@@ -4,6 +4,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from math import isfinite
 from os import PathLike, fspath
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 import numpy as np
@@ -21,6 +22,14 @@ from .types import (
     LoggerLevel,
     ReplayCalibration,
     dataclass_from_mapping,
+)
+
+STREAM_NAMES: Mapping[str, FrameType] = MappingProxyType(
+    {
+        "color": FrameType.COLOR,
+        "ir": FrameType.IR,
+        "depth": FrameType.DEPTH,
+    }
 )
 
 
@@ -315,11 +324,7 @@ class Frame:
 
 
 class FrameSet:
-    _NAMES: ClassVar[Mapping[str, FrameType]] = {
-        "color": FrameType.COLOR,
-        "ir": FrameType.IR,
-        "depth": FrameType.DEPTH,
-    }
+    _NAMES: ClassVar[Mapping[str, FrameType]] = STREAM_NAMES
 
     def __init__(
         self,
@@ -397,21 +402,23 @@ class FrameSet:
 
     def detached_copy(self) -> FrameSet:
         copied: dict[FrameType, Frame] = {}
-        for frame_type in FrameType:
-            if frame_type in self:
-                source = self[frame_type]
-                copied[frame_type] = Frame.from_array(
-                    source.to_numpy(copy=True),
-                    frame_type=frame_type,
-                    frame_format=source.format,
-                    timestamp=source.timestamp,
-                    sequence=source.sequence,
-                    exposure=source.exposure,
-                    gain=source.gain,
-                    gamma=source.gamma,
-                    status=source.status,
-                )
-        self.release()
+        try:
+            for frame_type in FrameType:
+                if frame_type in self:
+                    source = self[frame_type]
+                    copied[frame_type] = Frame.from_array(
+                        source.to_numpy(copy=True),
+                        frame_type=frame_type,
+                        frame_format=source.format,
+                        timestamp=source.timestamp,
+                        sequence=source.sequence,
+                        exposure=source.exposure,
+                        gain=source.gain,
+                        gamma=source.gamma,
+                        status=source.status,
+                    )
+        finally:
+            self.release()
         return FrameSet(copied=copied)
 
     def release(self) -> None:
@@ -498,6 +505,11 @@ class Device:
 
     @property
     def configuration(self) -> DeviceConfig:
+        """Last configuration applied through this object.
+
+        The device offers no read-back; before the first assignment this
+        reports the library defaults, which the core is assumed to share.
+        """
         if self.is_closed:
             raise DeviceStateError("device is closed")
         return self._configuration
@@ -779,7 +791,7 @@ class Camera:
     @staticmethod
     def _normalize_streams(streams: Iterable[str]) -> tuple[str, ...]:
         names = tuple(dict.fromkeys(str(stream).lower() for stream in streams))
-        if not names or any(name not in FrameSet._NAMES for name in names):
+        if not names or any(name not in STREAM_NAMES for name in names):
             raise ValueError("streams must contain color, ir, and/or depth")
         return names
 
@@ -792,7 +804,7 @@ class Camera:
     ) -> Camera:
         mask = FrameType(0)
         for stream in streams:
-            mask |= FrameSet._NAMES[stream]
+            mask |= STREAM_NAMES[stream]
         listener = SyncFrameListener(mask)
         try:
             if "color" in streams:

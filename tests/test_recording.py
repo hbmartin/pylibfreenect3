@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,6 +18,7 @@ from pylibfreenect3 import (
     IrCameraParams,
     RecordingBundle,
     RecordingFormatError,
+    RecordingStats,
     RecordingWriter,
 )
 from pylibfreenect3.types import (
@@ -55,20 +57,20 @@ def make_camera() -> SimpleNamespace:
     return SimpleNamespace(device=device, streams=("color", "ir", "depth"))
 
 
-def make_frames() -> FrameSet:
+def make_frames(sequence: int = 1) -> FrameSet:
     color = Frame.from_array(
         np.array([0xFF, 0xD8, 0xFF, 0xD9], dtype=np.uint8),
         frame_type=FrameType.COLOR,
         frame_format=FrameFormat.RAW,
-        timestamp=100,
-        sequence=1,
+        timestamp=100 + sequence,
+        sequence=sequence,
     )
     depth = Frame.from_array(
         np.arange(16, dtype=np.uint8),
         frame_type=FrameType.DEPTH,
         frame_format=FrameFormat.RAW,
-        timestamp=101,
-        sequence=1,
+        timestamp=200 + sequence,
+        sequence=sequence,
     )
     return FrameSet(copied={FrameType.COLOR: color, FrameType.DEPTH: depth})
 
@@ -93,6 +95,109 @@ def test_recording_bundle_round_trip(tmp_path: Path) -> None:
     assert len(bundle.frame_paths(("depth",))) == 1
     assert bundle.calibration.x_table.dtype == np.float32
     assert bundle.calibration.lookup_table.shape == (DEPTH_LOOKUP_TABLE_SIZE,)
+    assert bundle.manifest["recording_stats"] == {
+        "submitted": 1,
+        "written": 1,
+        "dropped": 0,
+        "failed": 0,
+    }
+
+
+def test_recording_bundle_reuses_frame_integrity_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "capture"
+    bundle = write_bundle(path)
+    original_read_bytes = Path.read_bytes
+
+    def reject_second_frame_read(candidate: Path) -> bytes:
+        if candidate.parent == path / "frames":
+            raise AssertionError(f"frame was hashed more than once: {candidate}")
+        return original_read_bytes(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_second_frame_read)
+    assert bundle.frame_paths(("color", "depth"))
+
+
+def test_background_recording_flushes_packets_and_reports_stats(tmp_path: Path) -> None:
+    path = tmp_path / "capture"
+    with RecordingWriter(path, make_camera(), queue_size=2) as writer:
+        assert writer.write(make_frames())
+        assert writer.flush() == RecordingStats(1, 1, 0, 0)
+        assert writer.stats.pending == 0
+
+    bundle = RecordingBundle.open(path)
+    assert len(bundle.manifest["frame_index"]) == 2
+
+
+class BlockingRecordingWriter(RecordingWriter):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.write_started = Event()
+        self.allow_write = Event()
+
+    def _write_packets(self, packets: object) -> None:
+        self.write_started.set()
+        if not self.allow_write.wait(timeout=5.0):
+            raise TimeoutError("test did not release background writer")
+        super()._write_packets(packets)  # type: ignore[arg-type]
+
+
+def test_background_recording_can_drop_and_count_queue_overflow(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "capture"
+    with BlockingRecordingWriter(
+        path, make_camera(), queue_size=1, overflow="drop"
+    ) as writer:
+        assert writer.write(make_frames(1))
+        assert writer.write_started.wait(timeout=5.0)
+        assert writer.write(make_frames(2))
+        assert not writer.write(make_frames(3))
+        assert writer.stats == RecordingStats(3, 0, 1, 0)
+        assert writer.stats.pending == 2
+        writer.allow_write.set()
+        assert writer.flush() == RecordingStats(3, 2, 1, 0)
+
+    bundle = RecordingBundle.open(path)
+    assert bundle.manifest["recording_stats"]["dropped"] == 1
+    assert len(bundle.manifest["frame_index"]) == 4
+
+
+class FailingRecordingWriter(RecordingWriter):
+    def _write_packets(self, packets: object) -> None:
+        raise OSError("simulated disk failure")
+
+
+def test_background_recording_failure_aborts_partial_bundle(tmp_path: Path) -> None:
+    path = tmp_path / "capture"
+    with pytest.raises(RecordingFormatError, match="background recording"):
+        with FailingRecordingWriter(path, make_camera(), queue_size=1) as writer:
+            assert writer.write(make_frames())
+            writer.flush()
+    assert not path.exists()
+    assert not list(tmp_path.glob(".capture.partial-*"))
+
+
+@pytest.mark.parametrize(
+    ("queue_size", "overflow", "message"),
+    [
+        (-1, "block", "non-negative integer"),
+        (1.5, "block", "non-negative integer"),
+        (0, "drop", "requires queue_size"),
+        (1, "invalid", "overflow must be"),
+    ],
+)
+def test_recording_queue_configuration_is_validated(
+    tmp_path: Path, queue_size: object, overflow: object, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        RecordingWriter(
+            tmp_path / "capture",
+            make_camera(),
+            queue_size=queue_size,  # type: ignore[arg-type]
+            overflow=overflow,  # type: ignore[arg-type]
+        )
 
 
 def test_recording_integrity_failure_is_rejected(tmp_path: Path) -> None:
@@ -181,6 +286,21 @@ def test_recording_exception_removes_partial_bundle(tmp_path: Path) -> None:
     assert not list(tmp_path.glob(".capture.partial-*"))
 
 
+def test_recording_entry_failure_removes_partial_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "capture"
+
+    def fail_calibration(_: FakeDumpPipeline) -> np.ndarray:
+        raise OSError("simulated calibration failure")
+
+    monkeypatch.setattr(FakeDumpPipeline, "depth_p0_tables", fail_calibration)
+    with pytest.raises(OSError, match="simulated calibration failure"):
+        RecordingWriter(target, make_camera()).__enter__()
+    assert not target.exists()
+    assert not list(tmp_path.glob(".capture.partial-*"))
+
+
 def test_replay_calibration_rejects_wrong_shapes_and_dtypes() -> None:
     from pylibfreenect3 import ReplayCalibration
 
@@ -190,6 +310,16 @@ def test_replay_calibration_rejects_wrong_shapes_and_dtypes() -> None:
             IrCameraParams(),
             np.zeros(P0_TABLES_BYTE_LENGTH, np.int8),
             np.zeros(DEPTH_TABLE_SIZE, np.float32),
+            np.zeros(DEPTH_TABLE_SIZE, np.float32),
+            np.zeros(DEPTH_LOOKUP_TABLE_SIZE, np.int16),
+        )
+
+    with pytest.raises(ValueError, match="X table must contain exactly"):
+        ReplayCalibration(
+            ColorCameraParams(),
+            IrCameraParams(),
+            np.zeros(P0_TABLES_BYTE_LENGTH, np.uint8),
+            np.zeros(DEPTH_TABLE_SIZE - 1, np.float32),
             np.zeros(DEPTH_TABLE_SIZE, np.float32),
             np.zeros(DEPTH_LOOKUP_TABLE_SIZE, np.int16),
         )

@@ -9,6 +9,7 @@ Capture, replay, and registration
 
    pylibfreenect3.Camera
    pylibfreenect3.RecordingWriter
+   pylibfreenect3.RecordingStats
    pylibfreenect3.RecordingBundle
    pylibfreenect3.Freenect2
    pylibfreenect3.Freenect2Replay
@@ -69,6 +70,12 @@ Core and logging queries
    pylibfreenect3.global_logger_level
    pylibfreenect3.logger_level_name
    pylibfreenect3.set_global_log_level
+
+Stream names
+------------
+
+``STREAM_NAMES`` is the immutable mapping from public stream names to
+``FrameType`` values.
 
 Exceptions
 ----------

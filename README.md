@@ -86,6 +86,10 @@ A normal decoded capture has these layouts:
 | `ir` | `(424, 512)` | `float32` | Infrared intensity |
 | `depth` | `(424, 512)` | `float32` | Depth in millimetres |
 
+See the [OpenCV and registration cookbook](docs/cookbook.rst) for channel
+conversion, lossless depth storage, coordinate maps, offline registration,
+image flips, and slow-consumer guidance.
+
 Select any non-empty combination of `"color"`, `"ir"`, and `"depth"`. To
 open a particular device, pass its zero-based index or serial number:
 
@@ -177,6 +181,9 @@ result = registration.apply(
 )
 ```
 
+The [cookbook](docs/cookbook.rst) documents the output layouts and shows how
+to register saved color and filtered-depth arrays safely.
+
 ## Pipelines
 
 Pass `pipeline="auto"` to let the core choose the best usable backend, or name
@@ -209,7 +216,8 @@ from pylibfreenect3 import Freenect2, MetalPacketPipeline
 
 context = Freenect2()
 pipeline = MetalPacketPipeline()
-device = context.open_device(pipeline=pipeline)
+with context.open_device(pipeline=pipeline) as device:
+    print(device.serial_number)
 ```
 
 ## Recording and replay
@@ -228,6 +236,23 @@ with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
     with RecordingWriter("capture.f3", camera) as recording:
         recording.capture(100, timeout=2.0)
 ```
+
+Recording is synchronous by default. For sustained capture, a bounded worker
+queue can move checksumming and filesystem writes off the capture loop:
+
+```python
+with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
+    with RecordingWriter(
+        "capture.f3", camera, queue_size=8, overflow="drop"
+    ) as recording:
+        recording.capture(1_000, timeout=2.0)
+        print(recording.flush())
+```
+
+`overflow="block"` applies backpressure when the queue is full;
+`overflow="drop"` keeps capture moving and records dropped frame-set counts in
+`RecordingWriter.stats` and the final manifest. Recording bundles contain raw
+JPEG/depth packets, not an encoded video container.
 
 Replay the bundle through any decoded pipeline available on the machine:
 

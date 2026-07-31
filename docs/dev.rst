@@ -18,6 +18,12 @@ with explicit Metal and automatic selection, then exercise registration,
 configuration/exposure, repeated open/close, outstanding arrays, recording, and
 Metal replay.
 
+The hardware lane also runs a 900-frame memory soak on both Metal and CPU. It
+warms each pipeline before sampling process high-water RSS and rejects growth
+above 128 MiB. ``PYLIBF3_HARDWARE_SOAK_FRAMES`` and
+``PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB`` can raise those release-gate thresholds
+for longer local qualification runs.
+
 Stable publication requires both repositories to be tagged ``v0.3.0``. Each
 repaired wheel is installed in a clean environment and inspected with
 ``otool``/delocate or ``ldd``/auditwheel. Only bundled project dependencies and

@@ -6,6 +6,7 @@ except PackageNotFoundError:
     __version__ = "0.3.0.dev0"
 
 from .api import (
+    STREAM_NAMES,
     Camera,
     CpuPacketPipeline,
     CudaKdePacketPipeline,
@@ -44,7 +45,7 @@ from .errors import (
     RecordingFormatError,
     ReplayError,
 )
-from .recording import RecordingBundle, RecordingWriter
+from .recording import RecordingBundle, RecordingStats, RecordingWriter
 from .types import (
     ColorCameraParams,
     ColorSettingCommand,
@@ -58,6 +59,7 @@ from .types import (
 )
 
 __all__ = [
+    "STREAM_NAMES",
     "BackendUnavailableError",
     "Camera",
     "ColorCameraParams",
@@ -88,6 +90,7 @@ __all__ = [
     "PacketPipeline",
     "RecordingBundle",
     "RecordingFormatError",
+    "RecordingStats",
     "RecordingWriter",
     "Registration",
     "RegistrationResult",

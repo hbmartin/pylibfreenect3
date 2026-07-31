@@ -40,10 +40,10 @@ cdef extern from "libfreenect2/frame_listener.hpp" namespace "libfreenect2":
 cdef extern from "libfreenect2/frame_listener_impl.h" namespace "libfreenect2":
     cdef cppclass NativeSyncListener "libfreenect2::SyncMultiFrameListener":
         NativeSyncListener(unsigned int) except +
-        bool hasNewFrame() const
-        void waitForNewFrame(map[NativeFrameType, NativeFrame *] &) nogil
-        bool waitForNewFrame(map[NativeFrameType, NativeFrame *] &, int) nogil
-        void release(map[NativeFrameType, NativeFrame *] &) nogil
+        bool hasNewFrame() except +
+        void waitForNewFrame(map[NativeFrameType, NativeFrame *] &) except + nogil
+        bool waitForNewFrame(map[NativeFrameType, NativeFrame *] &, int) except + nogil
+        void release(map[NativeFrameType, NativeFrame *] &) except + nogil
 
 cdef extern from "libfreenect2/color_settings.h" namespace "libfreenect2":
     cdef enum NativeColorSetting "libfreenect2::ColorSettingCommandType":
@@ -75,9 +75,9 @@ cdef extern from "libfreenect2/packet_pipeline.h" namespace "libfreenect2":
     vector[string] getAvailablePacketPipelines() except + nogil
 
 cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
-    string getVersion()
-    uint32_t getApiVersion()
-    string getBuildRevision()
+    string getVersion() except +
+    uint32_t getApiVersion() except +
+    string getBuildRevision() except +
 
     cdef cppclass NativeDevice "libfreenect2::Freenect2Device":
         cppclass ColorCameraParams:
@@ -98,40 +98,40 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
             bool EnableEdgeAwareFilter
             Config() except +
 
-        string getSerialNumber()
-        string getFirmwareVersion()
-        string getPacketPipelineName()
-        ColorCameraParams getColorCameraParams()
-        IrCameraParams getIrCameraParams()
-        void setColorCameraParams(const ColorCameraParams &) nogil
-        void setIrCameraParams(const IrCameraParams &) nogil
-        void setConfiguration(const Config &) nogil
-        void setColorFrameListener(NativeFrameListener *) nogil
-        void setIrAndDepthFrameListener(NativeFrameListener *) nogil
-        void setColorAutoExposure(float) nogil
-        void setColorSemiAutoExposure(float) nogil
-        void setColorManualExposure(float, float) nogil
-        void setColorSetting(NativeColorSetting, uint32_t) nogil
-        void setColorSetting(NativeColorSetting, float) nogil
-        uint32_t getColorSetting(NativeColorSetting) nogil
-        float getColorSettingFloat(NativeColorSetting) nogil
-        void setLedStatus(NativeLedSettings) nogil
-        bool start() nogil
-        bool startStreams(bool, bool) nogil
-        bool stop() nogil
-        bool close() nogil
+        string getSerialNumber() except +
+        string getFirmwareVersion() except +
+        string getPacketPipelineName() except +
+        ColorCameraParams getColorCameraParams() except +
+        IrCameraParams getIrCameraParams() except +
+        void setColorCameraParams(const ColorCameraParams &) except + nogil
+        void setIrCameraParams(const IrCameraParams &) except + nogil
+        void setConfiguration(const Config &) except + nogil
+        void setColorFrameListener(NativeFrameListener *) except + nogil
+        void setIrAndDepthFrameListener(NativeFrameListener *) except + nogil
+        void setColorAutoExposure(float) except + nogil
+        void setColorSemiAutoExposure(float) except + nogil
+        void setColorManualExposure(float, float) except + nogil
+        void setColorSetting(NativeColorSetting, uint32_t) except + nogil
+        void setColorSetting(NativeColorSetting, float) except + nogil
+        uint32_t getColorSetting(NativeColorSetting) except + nogil
+        float getColorSettingFloat(NativeColorSetting) except + nogil
+        void setLedStatus(NativeLedSettings) except + nogil
+        bool start() except + nogil
+        bool startStreams(bool, bool) except + nogil
+        bool stop() except + nogil
+        bool close() except + nogil
 
     cdef cppclass NativeFreenect2 "libfreenect2::Freenect2":
         NativeFreenect2() except +
-        int enumerateDevices() nogil
-        string getDeviceSerialNumber(int)
-        string getDefaultDeviceSerialNumber()
-        NativeDevice *openDevice(int) nogil
-        NativeDevice *openDevice(int, const NativePacketPipeline *) nogil
-        NativeDevice *openDevice(const string &) nogil
-        NativeDevice *openDevice(const string &, const NativePacketPipeline *) nogil
-        NativeDevice *openDefaultDevice() nogil
-        NativeDevice *openDefaultDevice(const NativePacketPipeline *) nogil
+        int enumerateDevices() except + nogil
+        string getDeviceSerialNumber(int) except +
+        string getDefaultDeviceSerialNumber() except +
+        NativeDevice *openDevice(int) except + nogil
+        NativeDevice *openDevice(int, const NativePacketPipeline *) except + nogil
+        NativeDevice *openDevice(const string &) except + nogil
+        NativeDevice *openDevice(const string &, const NativePacketPipeline *) except + nogil
+        NativeDevice *openDefaultDevice() except + nogil
+        NativeDevice *openDefaultDevice(const NativePacketPipeline *) except + nogil
 
     cdef cppclass ReplayCalibration "libfreenect2::Freenect2Replay::Calibration":
         NativeDevice.ColorCameraParams color
@@ -143,19 +143,19 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
 
     cdef cppclass NativeReplay "libfreenect2::Freenect2Replay":
         NativeReplay() except +
-        NativeDevice *openDevice(const vector[string] &) nogil
-        NativeDevice *openDevice(const vector[string] &, const NativePacketPipeline *) nogil
-        NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &) nogil
-        NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &, const NativePacketPipeline *) nogil
+        NativeDevice *openDevice(const vector[string] &) except + nogil
+        NativeDevice *openDevice(const vector[string] &, const NativePacketPipeline *) except + nogil
+        NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &) except + nogil
+        NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &, const NativePacketPipeline *) except + nogil
 
 cdef extern from "libfreenect2/registration.h" namespace "libfreenect2":
     cdef cppclass NativeRegistration "libfreenect2::Registration":
         NativeRegistration(NativeDevice.IrCameraParams, NativeDevice.ColorCameraParams) except +
-        void apply(int, int, float, float &, float &) nogil
-        void apply(const NativeFrame *, const NativeFrame *, NativeFrame *, NativeFrame *, bool, NativeFrame *, int *) nogil
-        void undistortDepth(const NativeFrame *, NativeFrame *) nogil
-        void getPointXYZRGB(const NativeFrame *, const NativeFrame *, int, int, float &, float &, float &, float &) nogil
-        void getPointXYZ(const NativeFrame *, int, int, float &, float &, float &) nogil
+        void apply(int, int, float, float &, float &) except + nogil
+        void apply(const NativeFrame *, const NativeFrame *, NativeFrame *, NativeFrame *, bool, NativeFrame *, int *) except + nogil
+        void undistortDepth(const NativeFrame *, NativeFrame *) except + nogil
+        void getPointXYZRGB(const NativeFrame *, const NativeFrame *, int, int, float &, float &, float &, float &) except + nogil
+        void getPointXYZ(const NativeFrame *, int, int, float &, float &, float &) except + nogil
 
 cdef extern from "libfreenect2/logger.h" namespace "libfreenect2":
     cdef enum NativeLoggerLevel "libfreenect2::Logger::Level":

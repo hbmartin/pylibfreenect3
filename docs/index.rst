@@ -8,5 +8,6 @@ Typed, ownership-safe bindings for libfreenect2-metal 0.3.
 
    installation
    getstarted
+   cookbook
    api
    dev

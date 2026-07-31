@@ -1,14 +1,18 @@
 """Capture and register color, IR, and depth frames synchronously."""
 
-from pylibfreenect3 import Camera, Registration
-
+from pylibfreenect3 import Camera, FrameTimeoutError, Registration
 
 with Camera.open(pipeline="auto", streams=("color", "ir", "depth")) as camera:
     registration = Registration(
         camera.device.ir_camera_params,
         camera.device.color_camera_params,
     )
-    for frames in camera.frames(timeout=2.0):
+    while True:
+        try:
+            frames = camera.capture(timeout=2.0)
+        except FrameTimeoutError:
+            print("Timed out waiting for synchronized frames; retrying")
+            continue
         with frames:
             result = registration.apply(frames.color, frames.depth)
             print(

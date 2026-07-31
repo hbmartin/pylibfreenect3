@@ -5,18 +5,50 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from queue import Full, Queue
+from threading import Lock, Thread
+from typing import Any, Iterable, Literal
 
 import numpy as np
 
-from .api import Camera, DumpPacketPipeline, FrameFormat, FrameSet, FrameType
+from .api import (
+    STREAM_NAMES,
+    Camera,
+    DumpPacketPipeline,
+    FrameFormat,
+    FrameSet,
+    FrameType,
+)
 from .errors import DeviceStateError, RecordingFormatError
 from .types import ColorCameraParams, IrCameraParams, ReplayCalibration
 
-
 SCHEMA_VERSION = 1
+_STOP_WRITER = object()
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingStats:
+    """Snapshot of frame-set throughput for a recording writer."""
+
+    submitted: int
+    written: int
+    dropped: int
+    failed: int
+
+    @property
+    def pending(self) -> int:
+        return max(0, self.submitted - self.written - self.dropped - self.failed)
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordingPacket:
+    stream: str
+    relative: str
+    timestamp: int
+    sequence: int
+    data: bytes
 
 
 def _sha256(data: bytes) -> str:
@@ -40,12 +72,40 @@ def _safe_child(root: Path, relative: str) -> Path:
 class RecordingWriter:
     """Atomically writes raw dump frames and calibration as schema-v1 bundle."""
 
-    def __init__(self, path: str | os.PathLike[str], camera: Camera) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        camera: Camera,
+        *,
+        queue_size: int = 0,
+        overflow: Literal["block", "drop"] = "block",
+    ) -> None:
+        if (
+            isinstance(queue_size, bool)
+            or not isinstance(queue_size, int)
+            or queue_size < 0
+        ):
+            raise ValueError("queue_size must be a non-negative integer")
+        if overflow not in ("block", "drop"):
+            raise ValueError("overflow must be 'block' or 'drop'")
+        if queue_size == 0 and overflow != "block":
+            raise ValueError("overflow='drop' requires queue_size greater than zero")
         self.path = Path(path)
         self.camera = camera
+        self.queue_size = queue_size
+        self.overflow = overflow
         self._working: Path | None = None
         self._manifest: dict[str, Any] | None = None
         self._closed = False
+        self._queue: Queue[tuple[_RecordingPacket, ...] | object] | None = None
+        self._worker: Thread | None = None
+        self._worker_error: BaseException | None = None
+        self._stats_lock = Lock()
+        self._submitted = 0
+        self._written = 0
+        self._dropped = 0
+        self._failed = 0
+        self._scheduled_paths: set[str] = set()
 
     def __enter__(self) -> RecordingWriter:
         if self.path.exists():
@@ -59,39 +119,56 @@ class RecordingWriter:
         self._working = Path(
             tempfile.mkdtemp(prefix=f".{self.path.name}.partial-", dir=self.path.parent)
         )
-        (self._working / "calibration").mkdir()
-        (self._working / "frames").mkdir()
+        try:
+            (self._working / "calibration").mkdir()
+            (self._working / "frames").mkdir()
 
-        calibration = {
-            "color": asdict(self.camera.device.color_camera_params),
-            "ir": asdict(self.camera.device.ir_camera_params),
-            "p0_tables": self._write_array(
-                "calibration/p0.bin", pipeline.depth_p0_tables()
-            ),
-            "x_table": self._write_array("calibration/x.bin", pipeline.depth_x_table()),
-            "z_table": self._write_array("calibration/z.bin", pipeline.depth_z_table()),
-            "lookup_table": self._write_array(
-                "calibration/lookup.bin", pipeline.depth_lookup_table()
-            ),
-        }
-        from .api import core_api_version, core_revision, core_version
+            calibration = {
+                "color": asdict(self.camera.device.color_camera_params),
+                "ir": asdict(self.camera.device.ir_camera_params),
+                "p0_tables": self._write_array(
+                    "calibration/p0.bin", pipeline.depth_p0_tables()
+                ),
+                "x_table": self._write_array(
+                    "calibration/x.bin", pipeline.depth_x_table()
+                ),
+                "z_table": self._write_array(
+                    "calibration/z.bin", pipeline.depth_z_table()
+                ),
+                "lookup_table": self._write_array(
+                    "calibration/lookup.bin", pipeline.depth_lookup_table()
+                ),
+            }
+            from .api import core_api_version, core_revision, core_version
 
-        self._manifest = {
-            "schema_version": SCHEMA_VERSION,
-            "core": {
-                "version": core_version(),
-                "api_version": core_api_version(),
-                "revision": core_revision(),
-            },
-            "device": {
-                "serial": self.camera.device.serial_number,
-                "firmware": self.camera.device.firmware_version,
-                "pipeline": self.camera.device.pipeline_name,
-            },
-            "enabled_streams": list(self.camera.streams),
-            "calibration": calibration,
-            "frame_index": [],
-        }
+            self._manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "core": {
+                    "version": core_version(),
+                    "api_version": core_api_version(),
+                    "revision": core_revision(),
+                },
+                "device": {
+                    "serial": self.camera.device.serial_number,
+                    "firmware": self.camera.device.firmware_version,
+                    "pipeline": self.camera.device.pipeline_name,
+                },
+                "enabled_streams": list(self.camera.streams),
+                "calibration": calibration,
+                "frame_index": [],
+            }
+            if self.queue_size:
+                self._queue = Queue(maxsize=self.queue_size)
+                worker = Thread(
+                    target=self._worker_main,
+                    name="pylibfreenect3-recording-writer",
+                    daemon=True,
+                )
+                worker.start()
+                self._worker = worker
+        except BaseException:
+            self.abort()
+            raise
         return self
 
     def __exit__(self, exc_type: object, *_: object) -> None:
@@ -116,7 +193,17 @@ class RecordingWriter:
             "sha256": _sha256(data),
         }
 
-    def write(self, frames: FrameSet) -> None:
+    @property
+    def stats(self) -> RecordingStats:
+        with self._stats_lock:
+            return RecordingStats(
+                submitted=self._submitted,
+                written=self._written,
+                dropped=self._dropped,
+                failed=self._failed,
+            )
+
+    def _packets(self, frames: FrameSet) -> tuple[_RecordingPacket, ...]:
         if self._closed or self._working is None or self._manifest is None:
             raise DeviceStateError("recording writer is not open")
         entries: list[tuple[str, FrameType]] = []
@@ -127,6 +214,7 @@ class RecordingWriter:
                 entries.append(("depth", FrameType.DEPTH))
             elif FrameType.IR in frames:
                 entries.append(("depth", FrameType.IR))
+        packets: list[_RecordingPacket] = []
         for stream, frame_type in entries:
             frame = frames[frame_type]
             if frame.format is not FrameFormat.RAW:
@@ -137,31 +225,134 @@ class RecordingWriter:
                 suffix = "jpg"
             else:
                 suffix = "depth"
-            data = frame.to_numpy(copy=True).tobytes(order="C")
+            data = frame.to_numpy().tobytes(order="C")
             relative = f"frames/{stream}_{frame.timestamp}_{frame.sequence}.{suffix}"
-            destination = _safe_child(self._working, relative)
-            if destination.exists():
+            if (
+                relative in self._scheduled_paths
+                or _safe_child(self._working, relative).exists()
+            ):
                 raise RecordingFormatError(
                     f"recording frame path is duplicated: {relative}"
                 )
-            destination.write_bytes(data)
+            packets.append(
+                _RecordingPacket(
+                    stream=stream,
+                    relative=relative,
+                    timestamp=frame.timestamp,
+                    sequence=frame.sequence,
+                    data=data,
+                )
+            )
+        return tuple(packets)
+
+    def _write_packets(self, packets: tuple[_RecordingPacket, ...]) -> None:
+        if self._working is None or self._manifest is None:
+            raise DeviceStateError("recording writer is not open")
+        for packet in packets:
+            destination = _safe_child(self._working, packet.relative)
+            if destination.exists():
+                raise RecordingFormatError(
+                    f"recording frame path is duplicated: {packet.relative}"
+                )
+            destination.write_bytes(packet.data)
             self._manifest["frame_index"].append(
                 {
-                    "stream": stream,
-                    "path": relative,
-                    "timestamp": frame.timestamp,
-                    "sequence": frame.sequence,
-                    "size": len(data),
-                    "sha256": _sha256(data),
+                    "stream": packet.stream,
+                    "path": packet.relative,
+                    "timestamp": packet.timestamp,
+                    "sequence": packet.sequence,
+                    "size": len(packet.data),
+                    "sha256": _sha256(packet.data),
                 }
             )
 
-    def capture(self, count: int, *, timeout: float | None = 2.0) -> None:
+    def _worker_main(self) -> None:
+        if self._queue is None:
+            return
+        while True:
+            item = self._queue.get()
+            try:
+                if item is _STOP_WRITER:
+                    return
+                with self._stats_lock:
+                    previous_error = self._worker_error
+                if previous_error is not None:
+                    with self._stats_lock:
+                        self._failed += 1
+                    continue
+                try:
+                    self._write_packets(item)  # type: ignore[arg-type]
+                except BaseException as error:
+                    with self._stats_lock:
+                        if self._worker_error is None:
+                            self._worker_error = error
+                        self._failed += 1
+                else:
+                    with self._stats_lock:
+                        self._written += 1
+            finally:
+                self._queue.task_done()
+
+    def _raise_worker_error(self) -> None:
+        with self._stats_lock:
+            error = self._worker_error
+        if error is not None:
+            raise RecordingFormatError("background recording write failed") from error
+
+    def write(self, frames: FrameSet) -> bool:
+        """Submit one frame set, returning false only when a full queue drops it."""
+        self._raise_worker_error()
+        packets = self._packets(frames)
+        with self._stats_lock:
+            self._submitted += 1
+        if self._queue is None:
+            try:
+                self._write_packets(packets)
+            except BaseException:
+                with self._stats_lock:
+                    self._failed += 1
+                raise
+            with self._stats_lock:
+                self._written += 1
+            self._scheduled_paths.update(packet.relative for packet in packets)
+            return True
+
+        if self.overflow == "drop":
+            try:
+                self._queue.put_nowait(packets)
+            except Full:
+                with self._stats_lock:
+                    self._dropped += 1
+                return False
+        else:
+            self._queue.put(packets)
+        self._scheduled_paths.update(packet.relative for packet in packets)
+        return True
+
+    def flush(self) -> RecordingStats:
+        """Wait for queued writes and surface any background failure."""
+        if self._closed or self._working is None:
+            raise DeviceStateError("recording writer is not open")
+        if self._queue is not None:
+            self._queue.join()
+        self._raise_worker_error()
+        return self.stats
+
+    def capture(self, count: int, *, timeout: float | None = 2.0) -> RecordingStats:
         if count < 0:
             raise ValueError("count must be non-negative")
         for _ in range(count):
             with self.camera.capture(timeout=timeout) as frames:
                 self.write(frames)
+        return self.stats
+
+    def _stop_worker(self) -> None:
+        if self._queue is None or self._worker is None:
+            return
+        self._queue.put(_STOP_WRITER)
+        self._worker.join()
+        self._worker = None
+        self._queue = None
 
     def close(self) -> None:
         if self._closed:
@@ -169,6 +360,15 @@ class RecordingWriter:
         if self._working is None or self._manifest is None:
             raise DeviceStateError("recording writer was never opened")
         try:
+            self.flush()
+            self._stop_worker()
+            final_stats = self.stats
+            self._manifest["recording_stats"] = {
+                "submitted": final_stats.submitted,
+                "written": final_stats.written,
+                "dropped": final_stats.dropped,
+                "failed": final_stats.failed,
+            }
             manifest_data = (
                 json.dumps(
                     self._manifest, indent=2, sort_keys=True, separators=(",", ": ")
@@ -190,6 +390,7 @@ class RecordingWriter:
 
     def abort(self) -> None:
         """Discard an incomplete bundle owned by this writer."""
+        self._stop_worker()
         if self._working is not None:
             shutil.rmtree(self._working, ignore_errors=True)
         self._working = None
@@ -205,6 +406,7 @@ class RecordingBundle:
         self.manifest = manifest
         self.calibration = calibration
         self.streams = tuple(str(value) for value in manifest["enabled_streams"])
+        self._verified: set[Path] = set()
 
     @classmethod
     def open(cls, path: str | os.PathLike[str]) -> RecordingBundle:
@@ -245,7 +447,7 @@ class RecordingBundle:
             not isinstance(streams, list)
             or not streams
             or len(streams) != len(set(streams))
-            or any(stream not in FrameSet._NAMES for stream in streams)
+            or any(stream not in STREAM_NAMES for stream in streams)
         ):
             raise RecordingFormatError("recording has an invalid stream list")
         calibration_data = manifest.get("calibration")
@@ -310,7 +512,7 @@ class RecordingBundle:
 
     def frame_paths(self, streams: Iterable[str]) -> list[str]:
         selected = set(streams)
-        if not selected or any(stream not in FrameSet._NAMES for stream in selected):
+        if not selected or any(stream not in STREAM_NAMES for stream in selected):
             raise RecordingFormatError("requested replay streams are invalid")
         if not selected <= set(self.streams):
             raise RecordingFormatError("requested replay streams were not recorded")
@@ -340,9 +542,16 @@ class RecordingBundle:
                 if path in seen:
                     raise RecordingFormatError(f"frame index repeats a path: {path}")
                 seen.add(path)
-                data = path.read_bytes()
-                if len(data) != int(entry["size"]) or _sha256(data) != entry["sha256"]:
-                    raise RecordingFormatError(f"frame failed integrity check: {path}")
+                if path not in self._verified:
+                    data = path.read_bytes()
+                    if (
+                        len(data) != int(entry["size"])
+                        or _sha256(data) != entry["sha256"]
+                    ):
+                        raise RecordingFormatError(
+                            f"frame failed integrity check: {path}"
+                        )
+                    self._verified.add(path)
                 if not isinstance(entry["timestamp"], int) or not isinstance(
                     entry["sequence"], int
                 ):
