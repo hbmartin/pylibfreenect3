@@ -229,6 +229,23 @@ with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
         recording.capture(100, timeout=2.0)
 ```
 
+Recording is synchronous by default. For sustained capture, a bounded worker
+queue can move checksumming and filesystem writes off the capture loop:
+
+```python
+with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
+    with RecordingWriter(
+        "capture.f3", camera, queue_size=8, overflow="drop"
+    ) as recording:
+        recording.capture(1_000, timeout=2.0)
+        print(recording.flush())
+```
+
+`overflow="block"` applies backpressure when the queue is full;
+`overflow="drop"` keeps capture moving and records dropped frame-set counts in
+`RecordingWriter.stats` and the final manifest. Recording bundles contain raw
+JPEG/depth packets, not an encoded video container.
+
 Replay the bundle through any decoded pipeline available on the machine:
 
 ```python

@@ -9,6 +9,7 @@ Capture, replay, and registration
 
    pylibfreenect3.Camera
    pylibfreenect3.RecordingWriter
+   pylibfreenect3.RecordingStats
    pylibfreenect3.RecordingBundle
    pylibfreenect3.Freenect2
    pylibfreenect3.Freenect2Replay

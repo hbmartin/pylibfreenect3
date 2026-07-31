@@ -44,7 +44,7 @@ from .errors import (
     RecordingFormatError,
     ReplayError,
 )
-from .recording import RecordingBundle, RecordingWriter
+from .recording import RecordingBundle, RecordingStats, RecordingWriter
 from .types import (
     ColorCameraParams,
     ColorSettingCommand,
@@ -88,6 +88,7 @@ __all__ = [
     "PacketPipeline",
     "RecordingBundle",
     "RecordingFormatError",
+    "RecordingStats",
     "RecordingWriter",
     "Registration",
     "RegistrationResult",
