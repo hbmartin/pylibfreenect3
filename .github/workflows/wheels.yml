@@ -62,7 +62,7 @@ jobs:
           uv run cython-lint --max-line-length 120 src/pylibfreenect3/_native.pyx
           uv run mypy
           uv run pyright --verifytypes pylibfreenect3 --ignoreexternal
-          uv run pytest -m "not hardware"
+          uv run pytest -m "not hardware" --cov=pylibfreenect3 --cov-report=term-missing --cov-fail-under=80
       - name: Check source metadata
         run: |
           uv build --sdist
@@ -308,7 +308,11 @@ jobs:
         run: |
           set -euo pipefail
           for wheel in wheelhouse/*.whl; do
-            uv run --isolated --no-project --with "$wheel" --with pytest --with pytest-cov \
+            tag=$(basename "$wheel" | sed -E 's/.*-(cp3[0-9]+)-.*/\1/')
+            version="${tag:2:1}.${tag:3}"
+            env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
+              uv run --isolated --no-project --python "$version" \
+              --with "$wheel" --with pytest \
               pytest tests/test_hardware.py -m hardware -q
           done
 

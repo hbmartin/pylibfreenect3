@@ -8,6 +8,8 @@
   builds driven by uv.
 - Adds `Stream` and `Pipeline`, mapping-compatible frame sets, NumPy 2 array
   protocol support, frozen value objects, and complete native type boundaries.
+- `Camera.capture` and `Camera.frames` now default to `timeout=2.0` seconds
+  instead of blocking indefinitely; pass `timeout=None` for the 0.3 behavior.
 - Retains libfreenect2-metal 0.3/API 3 and recording schema-v1 compatibility.
 
 ## 0.3.0

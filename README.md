@@ -337,6 +337,7 @@ Version 1.0 removes the old top-level aliases. Accessing one raises an
 | `STREAM_NAMES` | `Stream` |
 | pipeline strings | `Pipeline` (canonical strings still work) |
 | `Frame.type` | `Frame.frame_type` |
+| `capture()`/`frames()` wait forever | default `timeout=2.0`; pass `timeout=None` to wait forever |
 | `Device.is_running` | `Device.running` |
 | `Device.is_closed` | `Device.closed` |
 | `core_revision()` | `core_build_revision()` |
