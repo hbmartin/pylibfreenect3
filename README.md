@@ -86,6 +86,10 @@ A normal decoded capture has these layouts:
 | `ir` | `(424, 512)` | `float32` | Infrared intensity |
 | `depth` | `(424, 512)` | `float32` | Depth in millimetres |
 
+See the [OpenCV and registration cookbook](docs/cookbook.rst) for channel
+conversion, lossless depth storage, coordinate maps, offline registration,
+image flips, and slow-consumer guidance.
+
 Select any non-empty combination of `"color"`, `"ir"`, and `"depth"`. To
 open a particular device, pass its zero-based index or serial number:
 
@@ -176,6 +180,9 @@ result = registration.apply(
     include_color_depth_map=True,
 )
 ```
+
+The [cookbook](docs/cookbook.rst) documents the output layouts and shows how
+to register saved color and filtered-depth arrays safely.
 
 ## Pipelines
 
