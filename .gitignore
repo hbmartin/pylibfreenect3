@@ -1,4 +1,4 @@
-pylibfreenect2/libfreenect2.cpp
+src/pylibfreenect3/_native.cpp
 docs/generated
 
 # Created by https://www.gitignore.io

@@ -1,1 +1,10 @@
-recursive-include pylibfreenect2 *.cpp *.pxd *.pyx *.pxi
+include src/pylibfreenect3/*.pyx
+include src/pylibfreenect3/*.pxd
+include src/pylibfreenect3/py.typed
+recursive-include src/pylibfreenect3/licenses *
+recursive-include tests *.py
+recursive-include tools *.py *.sh
+recursive-include docs *.py *.rst
+recursive-include examples *.py
+include LICENSE.md
+include NEWS.md
