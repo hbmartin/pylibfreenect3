@@ -8,7 +8,7 @@
 Modern, typed, ownership-safe Python bindings for Microsoft Kinect v2 through
 [`libfreenect2-metal`](https://github.com/hbmartin/libfreenect2-metal).
 
-`pylibfreenect3` 0.3 provides:
+`pylibfreenect3` 1.0 provides:
 
 - a small high-level `Camera` API for synchronized color, infrared, and depth
   capture;
@@ -18,8 +18,9 @@ Modern, typed, ownership-safe Python bindings for Microsoft Kinect v2 through
 - checksummed recording bundles and deterministic replay; and
 - a typed low-level API for applications that need direct device control.
 
-This release targets GIL-enabled CPython 3.10–3.14. It is intentionally a new
-API and does **not** provide the old `pylibfreenect2` import name.
+This release targets GIL-enabled CPython 3.12–3.14. Python 3.15 prereleases are
+smoke-tested, but do not receive release wheels. It is intentionally a new API
+and does **not** provide the old `pylibfreenect2` import name.
 
 ## Supported platforms
 
@@ -30,7 +31,7 @@ API and does **not** provide the old `pylibfreenect2` import name.
 
 The wheels also bundle the compatible core library, libusb, and TurboJPEG.
 Windows, Intel macOS, Linux ARM64, free-threaded CPython, and GPU-enabled Linux
-wheels are not part of the 0.3 release. Other platforms may work from source if
+wheels are not part of the 1.0 release. Other platforms may work from source if
 the core library and a supported packet pipeline can be built there.
 
 Live capture requires a Kinect v2, its power/USB adapter, and a USB 3 connection.
@@ -39,12 +40,14 @@ replay from existing raw captures.
 
 ## Installation
 
-Install a wheel from PyPI:
+Run against the published wheel without changing the current project:
 
 ```console
-python -m pip install --upgrade pip
-python -m pip install pylibfreenect3
+uv run --with pylibfreenect3 python -c "import pylibfreenect3 as f3; print(f3.__version__)"
 ```
+
+For an application, declare `pylibfreenect3` in its `pyproject.toml` dependencies
+and run `uv sync`.
 
 Confirm that the binding and bundled core load correctly:
 
@@ -55,7 +58,7 @@ print("binding:", f3.__version__)
 print("core:", f3.core_version(), "API", f3.core_api_version())
 print("compiled pipelines:", sorted(f3.compiled_pipelines()))
 print("usable pipelines:", sorted(f3.available_pipelines()))
-print("connected devices:", f3.Freenect2().enumerate_devices())
+print("connected devices:", f3.lowlevel.Context().enumerate_devices())
 ```
 
 If your platform has no matching wheel, see [Building from source](#building-from-source).
@@ -69,7 +72,7 @@ pair, and expose both frames as NumPy arrays:
 from pylibfreenect3 import Camera
 
 with Camera.open(pipeline="auto", streams=("color", "depth")) as camera:
-    with camera.capture(timeout=2.0) as frames:
+    with camera.capture() as frames:
         color = frames.color.to_numpy()
         depth = frames.depth.to_numpy()
 
@@ -207,14 +210,14 @@ them.
 - An unavailable explicit backend raises `BackendUnavailableError`.
 - `dump` emits raw packets and is intended for recording, not decoded arrays.
 
-Pipeline classes are also public for low-level use. A pipeline object becomes
+Pipeline classes live in `pylibfreenect3.lowlevel`. A pipeline object becomes
 single-use once passed to `open_device()`; create a new instance for each
 device:
 
 ```python
-from pylibfreenect3 import Freenect2, MetalPacketPipeline
+from pylibfreenect3.lowlevel import Context, MetalPacketPipeline
 
-context = Freenect2()
+context = Context()
 pipeline = MetalPacketPipeline()
 with context.open_device(pipeline=pipeline) as device:
     print(device.serial_number)
@@ -265,7 +268,7 @@ with Camera.open_recording("capture.f3", pipeline="auto") as replay:
 
 `Camera.open_recording(..., streams=(...))` can replay a subset of the streams
 stored in a bundle. Loose `.jpg`/`.jpeg` and `.depth` packets can be opened with
-`Freenect2Replay`; raw depth packets require an explicit, validated
+`lowlevel.ReplayContext`; raw depth packets require an explicit, validated
 `ReplayCalibration`.
 
 ## Device configuration and logging
@@ -273,11 +276,12 @@ stored in a bundle. Loose `.jpg`/`.jpeg` and `.depth` packets can be opened with
 Use the low-level API when configuration must be applied before capture starts:
 
 ```python
-from pylibfreenect3 import DeviceConfig, Freenect2, LoggerLevel, set_global_log_level
+from pylibfreenect3 import DeviceConfig, LoggerLevel, set_global_log_level
+from pylibfreenect3.lowlevel import Context
 
 set_global_log_level(LoggerLevel.INFO)
 
-context = Freenect2()
+context = Context()
 with context.open_device(pipeline="cpu") as device:
     device.configuration = DeviceConfig(
         min_depth=0.5,  # metres
@@ -294,15 +298,16 @@ native console logging.
 
 ## Low-level API
 
-Use `Freenect2`, `Device`, and `SyncFrameListener` when you need explicit
+Use `lowlevel.Context`, `lowlevel.Device`, and `lowlevel.FrameListener` when you need explicit
 lifecycle control:
 
 ```python
-from pylibfreenect3 import Freenect2, FrameType, SyncFrameListener
+from pylibfreenect3 import FrameType
+from pylibfreenect3.lowlevel import Context, FrameListener
 
-context = Freenect2()
+context = Context()
 device = context.open_device(pipeline="cpu")
-listener = SyncFrameListener(FrameType.COLOR | FrameType.DEPTH)
+listener = FrameListener(FrameType.COLOR | FrameType.DEPTH)
 device.set_color_listener(listener)
 device.set_depth_listener(listener)
 device.start()
@@ -317,6 +322,28 @@ finally:
 `Frame`, `FrameSet`, and the parameter dataclasses can also be used without a
 physical device, which is useful for tests and replay tooling.
 
+## Migrating from 0.3
+
+Version 1.0 removes the old top-level aliases. Accessing one raises an
+`AttributeError` that names its replacement.
+
+| 0.3 API | 1.0 API |
+| --- | --- |
+| `Freenect2` | `lowlevel.Context` |
+| `Freenect2Replay` | `lowlevel.ReplayContext` |
+| `SyncFrameListener` | `lowlevel.FrameListener` |
+| `Device` | `lowlevel.Device` |
+| packet-pipeline classes | same class name under `lowlevel` |
+| `STREAM_NAMES` | `Stream` |
+| pipeline strings | `Pipeline` (canonical strings still work) |
+| `Frame.type` | `Frame.frame_type` |
+| `Device.is_running` | `Device.running` |
+| `Device.is_closed` | `Device.closed` |
+| `core_revision()` | `core_build_revision()` |
+| `LIBFREENECT2_INSTALL_PREFIX` | `Freenect2_ROOT` |
+
+Schema-v1 recording bundles remain readable and writable without conversion.
+
 ## Exceptions
 
 All library-specific exceptions inherit from `FreenectError`:
@@ -330,7 +357,7 @@ All library-specific exceptions inherit from `FreenectError`:
 | `ReplayError` | Raw packet replay fails |
 | `RecordingFormatError` | A bundle is invalid, incomplete, unsafe, or incompatible |
 
-Capture is intentionally synchronous in 0.3. Packet-parser hooks,
+Capture is intentionally synchronous in 1.0. Packet-parser hooks,
 decoder-thread Python callbacks, a Python logging callback, and an asyncio
 adapter are not exposed because their thread-safety and lifetime semantics
 would be misleading.
@@ -361,7 +388,7 @@ timeout, and test a smaller stream set such as `streams=("depth",)`.
 
 ### A source build finds the wrong core
 
-Set `LIBFREENECT2_INSTALL_PREFIX` to the exact installation prefix of
+Set `Freenect2_ROOT` to the exact installation prefix of
 `libfreenect2-metal` 0.3.x. The build probe prints the architecture, discovery
 source, headers, libraries, runtime/API version, compiled pipelines, and linked
 libraries to make mismatches visible.
@@ -372,15 +399,16 @@ Source installations link against an already-installed
 [`libfreenect2-metal`](https://github.com/hbmartin/libfreenect2-metal) 0.3.x.
 The build looks for it in this order:
 
-1. `LIBFREENECT2_INSTALL_PREFIX`
-2. `pkg-config` (`freenect2.pc`)
-3. `/usr/local`, `/usr`, and `/opt/homebrew`
+1. `Freenect2_ROOT`
+2. the core's CMake package
+3. `pkg-config` (`freenect2.pc`)
+4. standard system prefixes
 
 After installing the core and its native dependencies:
 
 ```console
-export LIBFREENECT2_INSTALL_PREFIX=/opt/libfreenect2-metal
-python -m pip install .
+export Freenect2_ROOT=/opt/libfreenect2-metal
+uv build --wheel
 ```
 
 The extension uses C++17 and requires Cython 3.2.8 or newer and NumPy 2.2 or
@@ -388,29 +416,26 @@ newer. The core headers and runtime must both be version 0.3.x with API 3.
 
 ## Development
 
-Create an environment, point the build at a compatible core, and install the
-test and documentation dependencies:
+Point the build at a compatible core and synchronize the locked development
+environment. The project supports uv 0.11.x.
 
 ```console
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-export LIBFREENECT2_INSTALL_PREFIX=/opt/libfreenect2-metal
-python -m pip install -e '.[test,docs]'
+export Freenect2_ROOT=/opt/libfreenect2-metal
+uv sync
 ```
 
 Run the hardware-free suite and build the documentation with warnings treated
 as errors:
 
 ```console
-python -m pytest -m 'not hardware'
-sphinx-build -W --keep-going docs docs/_build/html
+uv run pytest -m 'not hardware'
+uv run sphinx-build -W --keep-going docs docs/_build/html
 ```
 
 With a Kinect v2 attached, run the hardware tests explicitly:
 
 ```console
-python -m pytest tests/test_hardware.py -m hardware
+uv run pytest tests/test_hardware.py -m hardware
 ```
 
 See [`examples/`](examples), the [Sphinx documentation](docs/index.rst), and

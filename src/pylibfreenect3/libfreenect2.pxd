@@ -40,7 +40,7 @@ cdef extern from "libfreenect2/frame_listener.hpp" namespace "libfreenect2":
 cdef extern from "libfreenect2/frame_listener_impl.h" namespace "libfreenect2":
     cdef cppclass NativeSyncListener "libfreenect2::SyncMultiFrameListener":
         NativeSyncListener(unsigned int) except +
-        bool hasNewFrame() except +
+        bool hasNewFrame() except + nogil const
         void waitForNewFrame(map[NativeFrameType, NativeFrame *] &) except + nogil
         bool waitForNewFrame(map[NativeFrameType, NativeFrame *] &, int) except + nogil
         void release(map[NativeFrameType, NativeFrame *] &) except + nogil

@@ -5,24 +5,31 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 import numpy as np
 
 from .api import (
-    STREAM_NAMES,
     Camera,
-    DumpPacketPipeline,
-    FrameFormat,
     FrameSet,
-    FrameType,
 )
 from .errors import DeviceStateError, RecordingFormatError
-from .types import ColorCameraParams, IrCameraParams, ReplayCalibration
+from .lowlevel import DumpPacketPipeline
+from .types import (
+    ColorCameraParams,
+    FrameFormat,
+    FrameType,
+    IrCameraParams,
+    ReplayCalibration,
+    Stream,
+)
+
+__all__ = ["RecordingBundle", "RecordingStats", "RecordingWriter"]
 
 SCHEMA_VERSION = 1
 _STOP_WRITER = object()
@@ -30,7 +37,12 @@ _STOP_WRITER = object()
 
 @dataclass(frozen=True, slots=True)
 class RecordingStats:
-    """Snapshot of frame-set throughput for a recording writer."""
+    """Snapshot of frame-set throughput for a recording writer.
+
+    ``failed`` counts frame sets that were not persisted because a background
+    write failed; after the first failure every subsequent frame set is
+    counted here without a write attempt.
+    """
 
     submitted: int
     written: int
@@ -70,7 +82,12 @@ def _safe_child(root: Path, relative: str) -> Path:
 
 
 class RecordingWriter:
-    """Atomically writes raw dump frames and calibration as schema-v1 bundle."""
+    """Atomically writes raw dump frames and calibration as schema-v1 bundle.
+
+    A writer expects a single producer thread: ``write``, ``flush``, and
+    ``close`` must not be called concurrently. Only the internal worker
+    thread touches the filesystem in parallel with the producer.
+    """
 
     def __init__(
         self,
@@ -90,10 +107,10 @@ class RecordingWriter:
             raise ValueError("overflow must be 'block' or 'drop'")
         if queue_size == 0 and overflow != "block":
             raise ValueError("overflow='drop' requires queue_size greater than zero")
-        self.path = Path(path)
-        self.camera = camera
-        self.queue_size = queue_size
-        self.overflow = overflow
+        self.path: Path = Path(path)
+        self.camera: Camera = camera
+        self.queue_size: int = queue_size
+        self.overflow: Literal["block", "drop"] = overflow
         self._working: Path | None = None
         self._manifest: dict[str, Any] | None = None
         self._closed = False
@@ -139,14 +156,14 @@ class RecordingWriter:
                     "calibration/lookup.bin", pipeline.depth_lookup_table()
                 ),
             }
-            from .api import core_api_version, core_revision, core_version
+            from .api import core_api_version, core_build_revision, core_version
 
             self._manifest = {
                 "schema_version": SCHEMA_VERSION,
                 "core": {
                     "version": core_version(),
                     "api_version": core_api_version(),
-                    "revision": core_revision(),
+                    "revision": core_build_revision(),
                 },
                 "device": {
                     "serial": self.camera.device.serial_number,
@@ -219,12 +236,10 @@ class RecordingWriter:
             frame = frames[frame_type]
             if frame.format is not FrameFormat.RAW:
                 raise RecordingFormatError(
-                    f"dump recording expected raw {stream} frame, got {frame.format.name}"
+                    f"dump recording expected raw {stream} frame, "
+                    f"got {frame.format.name}"
                 )
-            if stream == "color":
-                suffix = "jpg"
-            else:
-                suffix = "depth"
+            suffix = "jpg" if stream == "color" else "depth"
             data = frame.to_numpy().tobytes(order="C")
             relative = f"frames/{stream}_{frame.timestamp}_{frame.sequence}.{suffix}"
             if (
@@ -349,7 +364,16 @@ class RecordingWriter:
     def _stop_worker(self) -> None:
         if self._queue is None or self._worker is None:
             return
-        self._queue.put(_STOP_WRITER)
+        # The worker exits only after consuming the sentinel, so a put cannot
+        # block for long while the worker is alive; the liveness check keeps
+        # this loop from hanging on a full queue if the worker ever gains an
+        # early exit path.
+        while self._worker.is_alive():
+            try:
+                self._queue.put(_STOP_WRITER, timeout=1.0)
+                break
+            except Full:
+                continue
         self._worker.join()
         self._worker = None
         self._queue = None
@@ -402,10 +426,12 @@ class RecordingBundle:
     def __init__(
         self, root: Path, manifest: dict[str, Any], calibration: ReplayCalibration
     ) -> None:
-        self.root = root
-        self.manifest = manifest
-        self.calibration = calibration
-        self.streams = tuple(str(value) for value in manifest["enabled_streams"])
+        self.root: Path = root
+        self.manifest: dict[str, Any] = manifest
+        self.calibration: ReplayCalibration = calibration
+        self.streams: tuple[Stream, ...] = tuple(
+            Stream(str(value)) for value in manifest["enabled_streams"]
+        )
         self._verified: set[Path] = set()
 
     @classmethod
@@ -447,7 +473,7 @@ class RecordingBundle:
             not isinstance(streams, list)
             or not streams
             or len(streams) != len(set(streams))
-            or any(stream not in STREAM_NAMES for stream in streams)
+            or any(stream not in Stream for stream in streams)
         ):
             raise RecordingFormatError("recording has an invalid stream list")
         calibration_data = manifest.get("calibration")
@@ -510,21 +536,26 @@ class RecordingBundle:
                 "invalid calibration sidecar descriptor"
             ) from error
 
-    def frame_paths(self, streams: Iterable[str]) -> list[str]:
-        selected = set(streams)
-        if not selected or any(stream not in STREAM_NAMES for stream in selected):
+    def frame_paths(self, streams: Iterable[str | Stream]) -> list[str]:
+        try:
+            selected = {Stream(str(stream).lower()) for stream in streams}
+        except ValueError as error:
+            raise RecordingFormatError(
+                "requested replay streams are invalid"
+            ) from error
+        if not selected:
             raise RecordingFormatError("requested replay streams are invalid")
         if not selected <= set(self.streams):
             raise RecordingFormatError("requested replay streams were not recorded")
         file_streams: set[str] = set()
-        if "color" in selected:
-            file_streams.add("color")
-        if selected & {"ir", "depth"}:
+        if Stream.COLOR in selected:
+            file_streams.add(Stream.COLOR)
+        if selected & {Stream.IR, Stream.DEPTH}:
             file_streams.add("depth")
         recorded_file_streams = set()
-        if "color" in self.streams:
+        if Stream.COLOR in self.streams:
             recorded_file_streams.add("color")
-        if set(self.streams) & {"ir", "depth"}:
+        if set(self.streams) & {Stream.IR, Stream.DEPTH}:
             recorded_file_streams.add("depth")
         paths: list[str] = []
         found_streams: set[str] = set()

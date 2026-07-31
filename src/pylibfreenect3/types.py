@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from enum import IntEnum, IntFlag
+from enum import IntEnum, IntFlag, StrEnum
 from math import isfinite
-from typing import Any, Mapping
+from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
+
+__all__ = [
+    "ColorCameraParams",
+    "ColorSettingCommand",
+    "DeviceConfig",
+    "FrameFormat",
+    "FrameType",
+    "IrCameraParams",
+    "LedSettings",
+    "LoggerLevel",
+    "Pipeline",
+    "ReplayCalibration",
+    "Stream",
+]
 
 
 DEPTH_TABLE_SIZE = 512 * 424
@@ -17,6 +33,24 @@ class FrameType(IntFlag):
     COLOR = 1
     IR = 2
     DEPTH = 4
+
+
+class Stream(StrEnum):
+    COLOR = "color"
+    IR = "ir"
+    DEPTH = "depth"
+
+
+class Pipeline(StrEnum):
+    AUTO = "auto"
+    CPU = "cpu"
+    METAL = "metal"
+    OPENGL = "opengl"
+    OPENCL = "opencl"
+    OPENCL_KDE = "opencl_kde"
+    CUDA = "cuda"
+    CUDA_KDE = "cuda_kde"
+    DUMP = "dump"
 
 
 class FrameFormat(IntEnum):
@@ -116,7 +150,7 @@ class ColorSettingCommand(IntEnum):
     GET_FRAME_RATE = 83
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class DeviceConfig:
     min_depth: float = 0.5
     max_depth: float = 4.5
@@ -134,7 +168,7 @@ class DeviceConfig:
             raise TypeError("depth filter settings must be bool values")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class IrCameraParams:
     fx: float = 0.0
     fy: float = 0.0
@@ -153,7 +187,7 @@ class IrCameraParams:
             raise ValueError("IR focal lengths must be non-negative")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ColorCameraParams:
     fx: float = 0.0
     fy: float = 0.0
@@ -189,7 +223,7 @@ class ColorCameraParams:
             raise ValueError("color focal lengths must be non-negative")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class LedSettings:
     led_id: int
     mode: int = 0
@@ -217,23 +251,32 @@ class LedSettings:
 class ReplayCalibration:
     color: ColorCameraParams
     ir: IrCameraParams
-    p0_tables: Any
-    x_table: Any
-    z_table: Any
-    lookup_table: Any
+    p0_tables: npt.NDArray[np.uint8]
+    x_table: npt.NDArray[np.float32]
+    z_table: npt.NDArray[np.float32]
+    lookup_table: npt.NDArray[np.int16]
 
     def __post_init__(self) -> None:
-        self.p0_tables = self._array(
-            self.p0_tables, np.uint8, P0_TABLES_BYTE_LENGTH, "P0 tables"
+        self.p0_tables = cast(
+            npt.NDArray[np.uint8],
+            self._array(self.p0_tables, np.uint8, P0_TABLES_BYTE_LENGTH, "P0 tables"),
         )
-        self.x_table = self._array(
-            self.x_table, np.float32, DEPTH_TABLE_SIZE, "X table"
+        self.x_table = cast(
+            npt.NDArray[np.float32],
+            self._array(self.x_table, np.float32, DEPTH_TABLE_SIZE, "X table"),
         )
-        self.z_table = self._array(
-            self.z_table, np.float32, DEPTH_TABLE_SIZE, "Z table"
+        self.z_table = cast(
+            npt.NDArray[np.float32],
+            self._array(self.z_table, np.float32, DEPTH_TABLE_SIZE, "Z table"),
         )
-        self.lookup_table = self._array(
-            self.lookup_table, np.int16, DEPTH_LOOKUP_TABLE_SIZE, "lookup table"
+        self.lookup_table = cast(
+            npt.NDArray[np.int16],
+            self._array(
+                self.lookup_table,
+                np.int16,
+                DEPTH_LOOKUP_TABLE_SIZE,
+                "lookup table",
+            ),
         )
 
     @staticmethod
@@ -246,5 +289,8 @@ class ReplayCalibration:
         return np.ascontiguousarray(array).reshape(-1)
 
 
-def dataclass_from_mapping(cls: type[Any], values: Mapping[str, Any]) -> Any:
-    return cls(**{field.name: values[field.name] for field in fields(cls)})
+def _dataclass_from_mapping[DataclassT](
+    cls: type[DataclassT], values: Mapping[str, Any]
+) -> DataclassT:
+    dataclass_fields = fields(cast(Any, cls))
+    return cls(**{field.name: values[field.name] for field in dataclass_fields})

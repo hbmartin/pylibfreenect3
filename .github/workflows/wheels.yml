@@ -1,26 +1,79 @@
-name: 0.3 release artifacts
+name: 1.0 quality and release artifacts
 
 on:
   pull_request:
   workflow_dispatch:
     inputs:
       core_ref:
-        description: libfreenect2-metal ref (release builds must use v0.3.0)
+        description: libfreenect2-metal ref (release builds require v0.3.0)
         required: false
         default: cda644a1613156d5e347ce1c1fcf0c6ba06e7bad
   push:
     tags:
-      - v0.3.0
+      - "v*"
 
 permissions:
   contents: read
 
 env:
+  UV_VERSION: 0.11.30
   CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.3.0' || 'cda644a1613156d5e347ce1c1fcf0c6ba06e7bad') }}
 
 jobs:
+  quality:
+    name: Quality, types, metadata, and coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Build the hardware-free native core
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libusb-1.0-0-dev libturbojpeg0-dev ninja-build
+          cmake -S vendor/libfreenect2-metal -B "$RUNNER_TEMP/core" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+            -DBUILD_OPENNI2_DRIVER=OFF -DBUILD_STREAMER_RECORDER=OFF \
+            -DBUILD_MEDIAPIPE_DEMO=OFF \
+            -DENABLE_CUDA=OFF -DENABLE_METAL=OFF \
+            -DENABLE_OPENCL=OFF -DENABLE_OPENGL=OFF
+          cmake --build "$RUNNER_TEMP/core" --parallel 2
+          cmake --install "$RUNNER_TEMP/core"
+      - name: Validate lock and synchronize
+        run: uv sync --locked
+        env:
+          Freenect2_ROOT: ${{ runner.temp }}/core-prefix
+      - name: Run fast quality gate
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run cython-lint --max-line-length 120 src/pylibfreenect3/_native.pyx
+          uv run mypy
+          uv run pyright --verifytypes pylibfreenect3 --ignoreexternal
+          uv run pytest -m "not hardware"
+      - name: Check source metadata
+        run: |
+          uv build --sdist
+          uv run twine check dist/*
+      - name: Verify release tag matches project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "${GITHUB_REF_NAME}" = "v$(uv version --short)"
+
   wheels:
     name: ${{ matrix.name }} wheels
+    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -42,20 +95,19 @@ jobs:
           ref: ${{ env.CORE_REF }}
           path: vendor/libfreenect2-metal
           persist-credentials: false
-      - name: Verify coordinated release tag
+      - name: Verify coordinated core release tag
         if: startsWith(github.ref, 'refs/tags/')
         run: test "$(git -C vendor/libfreenect2-metal describe --tags --exact-match)" = v0.3.0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.14"
-      - name: Install pinned wheel tooling
-        run: python -m pip install cibuildwheel==4.1.1 ${{ runner.os == 'macOS' && 'delocate==0.13.0' || 'auditwheel==6.7.0' }}
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
       - name: Build and repair wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+        run: uv run --no-project --with cibuildwheel==4.1.1 cibuildwheel --output-dir wheelhouse
         env:
           PYLIBF3_REQUIRE_CORE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
       - name: Inspect repaired dependency closure
-        run: python tools/verify_wheel.py wheelhouse/*.whl
+        run: uv run --no-project --with ${{ runner.os == 'macOS' && 'delocate==0.13.0' || 'auditwheel==6.7.0' }} python tools/verify_wheel.py wheelhouse/*.whl
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ${{ matrix.artifact }}
@@ -63,18 +115,32 @@ jobs:
           if-no-files-found: error
 
   sdist:
+    name: Core-independent sdist
+    needs: quality
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.14"
-      - name: Build source distribution
+          version: ${{ env.UV_VERSION }}
+      - name: Build sdist without libfreenect2
+        run: uv build --sdist
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - name: Build a wheel from the sdist
         run: |
-          python -m pip install build==1.3.0
-          python -m build --sdist
+          bash tools/build_wheel_dependencies.sh vendor/libfreenect2-metal
+          uv build --wheel dist/*.tar.gz --out-dir sdist-wheelhouse
+          uv run --isolated --no-project --with sdist-wheelhouse/*.whl python -c "import pylibfreenect3; assert pylibfreenect3.core_api_version() == 3"
+        env:
+          Freenect2_ROOT: /tmp/pylibfreenect3-wheel-prefix
+          PYLIBF3_WHEEL_PREFIX: /tmp/pylibfreenect3-wheel-prefix
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: sdist
@@ -82,6 +148,8 @@ jobs:
           if-no-files-found: error
 
   sanitizers:
+    name: ASan and UBSan ownership gate
+    needs: quality
     runs-on: ubuntu-24.04
     env:
       ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1
@@ -96,9 +164,9 @@ jobs:
           ref: ${{ env.CORE_REF }}
           path: vendor/libfreenect2-metal
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.13"
+          version: ${{ env.UV_VERSION }}
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -108,35 +176,96 @@ jobs:
           cmake -S vendor/libfreenect2-metal -B "$RUNNER_TEMP/core-sanitized" -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
-            -DBUILD_EXAMPLES=OFF \
-            -DBUILD_OPENNI2_DRIVER=OFF \
-            -DBUILD_STREAMER_RECORDER=OFF \
+            -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=ON \
+            -DBUILD_OPENNI2_DRIVER=OFF -DBUILD_STREAMER_RECORDER=OFF \
             -DBUILD_MEDIAPIPE_DEMO=OFF \
-            -DBUILD_TESTING=ON \
-            -DENABLE_ASAN=ON \
-            -DENABLE_UBSAN=ON \
-            -DENABLE_CUDA=OFF \
-            -DENABLE_METAL=OFF \
-            -DENABLE_OPENCL=OFF \
-            -DENABLE_OPENGL=OFF
+            -DENABLE_ASAN=ON -DENABLE_UBSAN=ON \
+            -DENABLE_CUDA=OFF -DENABLE_METAL=OFF \
+            -DENABLE_OPENCL=OFF -DENABLE_OPENGL=OFF
           cmake --build "$RUNNER_TEMP/core-sanitized" --parallel 2
           cmake --install "$RUNNER_TEMP/core-sanitized"
-      - name: Run core unit tests under ASan and UBSan
-        run: ctest --test-dir "$RUNNER_TEMP/core-sanitized" -L unit --output-on-failure --timeout 180
-      - name: Build sanitized binding and run ownership/replay tests
+          ctest --test-dir "$RUNNER_TEMP/core-sanitized" -L unit --output-on-failure --timeout 180
+      - name: Run binding ownership and replay tests
         run: |
-          python -m pip install 'Cython>=3.2.8' 'numpy>=2.2' 'pytest>=8' setuptools wheel
           sanitizer_flags='-fsanitize=address,undefined -fno-omit-frame-pointer'
           asan_runtime=$(cc -print-file-name=libasan.so)
           CPPFLAGS="$sanitizer_flags" CFLAGS="$sanitizer_flags" \
             CXXFLAGS="$sanitizer_flags" LDFLAGS="$sanitizer_flags" \
-            LIBFREENECT2_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
-            LD_LIBRARY_PATH="$RUNNER_TEMP/core-prefix/lib" \
-            python -m pip install --no-build-isolation --editable .
-          LIBFREENECT2_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
-            LD_LIBRARY_PATH="$RUNNER_TEMP/core-prefix/lib" \
-            LD_PRELOAD="$asan_runtime" \
-            python -m pytest tests/test_api.py tests/test_recording.py -q
+            uv sync --locked --no-default-groups --group test
+          LD_PRELOAD="$asan_runtime" uv run pytest tests/test_api.py tests/test_recording.py -q
+        env:
+          Freenect2_ROOT: ${{ runner.temp }}/core-prefix
+          LD_LIBRARY_PATH: ${{ runner.temp }}/core-prefix/lib
+
+  prerelease:
+    name: CPython 3.15 prerelease smoke
+    needs: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.15"
+      - name: Build native core and smoke test
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libusb-1.0-0-dev libturbojpeg0-dev ninja-build
+          cmake -S vendor/libfreenect2-metal -B "$RUNNER_TEMP/core" -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+            -DBUILD_OPENNI2_DRIVER=OFF -DBUILD_STREAMER_RECORDER=OFF \
+            -DBUILD_MEDIAPIPE_DEMO=OFF \
+            -DENABLE_CUDA=OFF -DENABLE_METAL=OFF -DENABLE_OPENCL=OFF -DENABLE_OPENGL=OFF
+          cmake --build "$RUNNER_TEMP/core" --parallel 2
+          cmake --install "$RUNNER_TEMP/core"
+          uv sync --python 3.15 --prerelease allow --no-default-groups --group test
+          uv run pytest tests/test_api.py -q
+        env:
+          Freenect2_ROOT: ${{ runner.temp }}/core-prefix
+
+  free_threaded:
+    name: CPython 3.14t GIL fallback smoke
+    needs: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.14t"
+      - name: Verify importing the extension enables the GIL fallback
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libusb-1.0-0-dev libturbojpeg0-dev ninja-build
+          cmake -S vendor/libfreenect2-metal -B "$RUNNER_TEMP/core" -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+            -DBUILD_OPENNI2_DRIVER=OFF -DBUILD_STREAMER_RECORDER=OFF \
+            -DBUILD_MEDIAPIPE_DEMO=OFF \
+            -DENABLE_CUDA=OFF -DENABLE_METAL=OFF -DENABLE_OPENCL=OFF -DENABLE_OPENGL=OFF
+          cmake --build "$RUNNER_TEMP/core" --parallel 2
+          cmake --install "$RUNNER_TEMP/core"
+          uv sync --python 3.14t --no-default-groups
+          uv run python -c "import sys, pylibfreenect3; assert sys._is_gil_enabled()"
+        env:
+          Freenect2_ROOT: ${{ runner.temp }}/core-prefix
 
   docs:
     needs: wheels
@@ -149,13 +278,11 @@ jobs:
         with:
           name: wheels-manylinux-x86_64
           path: wheelhouse
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.14"
+          version: ${{ env.UV_VERSION }}
       - name: Build documentation against the repaired wheel
-        run: |
-          python -m pip install wheelhouse/*cp314*.whl 'sphinx>=8' 'sphinx-rtd-theme>=3'
-          sphinx-build -W --keep-going docs docs/_build/html
+        run: uv run --isolated --no-project --with wheelhouse/*cp314*.whl --with sphinx --with sphinx-rtd-theme sphinx-build -W --keep-going docs docs/_build/html
 
   hardware:
     if: startsWith(github.ref, 'refs/tags/')
@@ -170,9 +297,9 @@ jobs:
         with:
           name: wheels-macos-arm64
           path: wheelhouse
-      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          enable-cache: false
+          version: ${{ env.UV_VERSION }}
       - name: Test every macOS wheel on a Kinect v2
         shell: bash
         env:
@@ -181,23 +308,19 @@ jobs:
         run: |
           set -euo pipefail
           for wheel in wheelhouse/*.whl; do
-            tag=$(basename "$wheel" | sed -E 's/.*-(cp3[0-9]+)-.*/\1/')
-            version="${tag:2:1}.${tag:3}"
-            environment="$RUNNER_TEMP/pylibfreenect3-$tag"
-            uv venv --python "$version" "$environment"
-            env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
-              uv pip install --python "$environment/bin/python" "$wheel" pytest
-            env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
-              "$environment/bin/python" -m pytest tests/test_hardware.py -m hardware -q
+            uv run --isolated --no-project --with "$wheel" --with pytest --with pytest-cov \
+              pytest tests/test_hardware.py -m hardware -q
           done
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [wheels, sdist, sanitizers, docs, hardware]
+    needs: [wheels, sdist, sanitizers, prerelease, free_threaded, docs, hardware]
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       id-token: write
+      attestations: write
+      contents: read
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -208,4 +331,11 @@ jobs:
         with:
           name: sdist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: dist/*
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Publish through PyPI Trusted Publishing
+        run: uv publish dist/*

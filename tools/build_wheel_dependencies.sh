@@ -135,12 +135,21 @@ cmake --build "$work_dir/core-build" --parallel 2
 cmake --install "$work_dir/core-build"
 
 license_dir="$project_dir/src/pylibfreenect3/licenses"
-mkdir -p "$license_dir"
-cp "$core_source/APACHE20" "$license_dir/libfreenect2-APACHE20.txt"
-cp "$core_source/GPL2" "$license_dir/libfreenect2-GPL2.txt"
-cp "$core_source/CONTRIB" "$license_dir/libfreenect2-CONTRIB.txt"
-cp "$work_dir/libusb/COPYING" "$license_dir/libusb-COPYING.txt"
-cp "$work_dir/turbojpeg/LICENSE.md" "$license_dir/libjpeg-turbo-LICENSE.md"
+declare -a license_pairs=(
+  "$core_source/APACHE20:$license_dir/libfreenect2-APACHE20.txt"
+  "$core_source/GPL2:$license_dir/libfreenect2-GPL2.txt"
+  "$core_source/CONTRIB:$license_dir/libfreenect2-CONTRIB.txt"
+  "$work_dir/libusb/COPYING:$license_dir/libusb-COPYING.txt"
+  "$work_dir/turbojpeg/LICENSE.md:$license_dir/libjpeg-turbo-LICENSE.md"
+)
+for pair in "${license_pairs[@]}"; do
+  source_license=${pair%%:*}
+  packaged_license=${pair#*:}
+  if ! cmp -s "$source_license" "$packaged_license"; then
+    echo "packaged dependency license is stale: $packaged_license" >&2
+    exit 1
+  fi
+done
 
 echo "wheel dependency prefix: $wheel_prefix"
 echo "libusb version: ${libusb_version}"

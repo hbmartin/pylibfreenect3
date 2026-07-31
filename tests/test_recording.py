@@ -10,7 +10,6 @@ import pytest
 
 from pylibfreenect3 import (
     ColorCameraParams,
-    DumpPacketPipeline,
     Frame,
     FrameFormat,
     FrameSet,
@@ -21,6 +20,7 @@ from pylibfreenect3 import (
     RecordingStats,
     RecordingWriter,
 )
+from pylibfreenect3.lowlevel import DumpPacketPipeline
 from pylibfreenect3.types import (
     DEPTH_LOOKUP_TABLE_SIZE,
     DEPTH_TABLE_SIZE,
@@ -171,10 +171,14 @@ class FailingRecordingWriter(RecordingWriter):
 
 def test_background_recording_failure_aborts_partial_bundle(tmp_path: Path) -> None:
     path = tmp_path / "capture"
-    with pytest.raises(RecordingFormatError, match="background recording"):
+
+    def write_and_flush() -> None:
         with FailingRecordingWriter(path, make_camera(), queue_size=1) as writer:
             assert writer.write(make_frames())
             writer.flush()
+
+    with pytest.raises(RecordingFormatError, match="background recording"):
+        write_and_flush()
     assert not path.exists()
     assert not list(tmp_path.glob(".capture.partial-*"))
 
@@ -272,16 +276,14 @@ def test_recording_requires_frames_for_every_enabled_stream(tmp_path: Path) -> N
 def test_recording_target_is_never_overwritten(tmp_path: Path) -> None:
     target = tmp_path / "existing"
     target.mkdir()
-    with pytest.raises(FileExistsError):
-        with RecordingWriter(target, make_camera()):
-            pass
+    with pytest.raises(FileExistsError), RecordingWriter(target, make_camera()):
+        pass
 
 
 def test_recording_exception_removes_partial_bundle(tmp_path: Path) -> None:
     target = tmp_path / "capture"
-    with pytest.raises(RuntimeError):
-        with RecordingWriter(target, make_camera()):
-            raise RuntimeError("capture failed")
+    with pytest.raises(RuntimeError), RecordingWriter(target, make_camera()):
+        raise RuntimeError("capture failed")
     assert not target.exists()
     assert not list(tmp_path.glob(".capture.partial-*"))
 

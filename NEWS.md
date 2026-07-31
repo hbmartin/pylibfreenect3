@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0
+
+- Requires Python 3.12+ and adopts a curated high-level API with native
+  lifecycle primitives under `pylibfreenect3.lowlevel`.
+- Replaces the legacy packaging stack with reproducible scikit-build-core/CMake
+  builds driven by uv.
+- Adds `Stream` and `Pipeline`, mapping-compatible frame sets, NumPy 2 array
+  protocol support, frozen value objects, and complete native type boundaries.
+- Retains libfreenect2-metal 0.3/API 3 and recording schema-v1 compatibility.
+
 ## 0.3.0
 
 - Renamed the distribution and import namespace to `pylibfreenect3` with no
@@ -14,6 +24,8 @@
   and observable queue statistics.
 - Reject native camera resources inherited across `fork()` and document the
   multiprocessing `spawn` boundary.
+- `Frame.from_array` now rejects read-only arrays because native frames
+  expose writable data; pass a writable copy for mapped or frozen inputs.
 - Added ownership stress coverage, hardware RSS soaks, and an OpenCV/offline
   registration cookbook.
 - Replaced the legacy build with `pyproject.toml`, Cython 3, C++17,

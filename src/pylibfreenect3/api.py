@@ -4,10 +4,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from math import isfinite
 from os import PathLike, fspath
-from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import ClassVar, cast, overload
 
 import numpy as np
+import numpy.typing as npt
 
 from . import _native
 from .errors import DeviceOpenError, DeviceStateError, ReplayError
@@ -20,17 +20,49 @@ from .types import (
     IrCameraParams,
     LedSettings,
     LoggerLevel,
+    Pipeline,
     ReplayCalibration,
-    dataclass_from_mapping,
+    Stream,
+    _dataclass_from_mapping,
 )
 
-STREAM_NAMES: Mapping[str, FrameType] = MappingProxyType(
-    {
-        "color": FrameType.COLOR,
-        "ir": FrameType.IR,
-        "depth": FrameType.DEPTH,
-    }
-)
+__all__ = [
+    "Camera",
+    "Context",
+    "CpuPacketPipeline",
+    "CudaKdePacketPipeline",
+    "CudaPacketPipeline",
+    "Device",
+    "DumpPacketPipeline",
+    "Frame",
+    "FrameListener",
+    "FrameSet",
+    "MetalPacketPipeline",
+    "OpenCLKdePacketPipeline",
+    "OpenCLPacketPipeline",
+    "OpenGLPacketPipeline",
+    "PacketPipeline",
+    "Registration",
+    "RegistrationResult",
+    "ReplayContext",
+    "available_pipelines",
+    "compiled_pipelines",
+    "core_api_version",
+    "core_build_revision",
+    "core_version",
+    "default_logger_level",
+    "global_logger_level",
+    "logger_level_name",
+    "set_global_log_level",
+]
+
+_STREAM_TYPES: Mapping[Stream, FrameType] = {
+    Stream.COLOR: FrameType.COLOR,
+    Stream.IR: FrameType.IR,
+    Stream.DEPTH: FrameType.DEPTH,
+}
+
+type _FrameArray = npt.NDArray[np.uint8] | npt.NDArray[np.float32]
 
 
 def core_version() -> str:
@@ -41,21 +73,17 @@ def core_api_version() -> int:
     return _native.core_api_version()
 
 
-def core_revision() -> str:
+def core_build_revision() -> str:
+    """Return the source revision embedded in the loaded core library."""
     return _native.core_revision()
 
 
-def core_build_revision() -> str:
-    """Return the source revision embedded in the loaded core library."""
-    return core_revision()
+def compiled_pipelines() -> frozenset[Pipeline]:
+    return frozenset(Pipeline(name) for name in _native.compiled_pipelines())
 
 
-def compiled_pipelines() -> frozenset[str]:
-    return _native.compiled_pipelines()
-
-
-def available_pipelines() -> frozenset[str]:
-    return _native.available_pipelines()
+def available_pipelines() -> frozenset[Pipeline]:
+    return frozenset(Pipeline(name) for name in _native.available_pipelines())
 
 
 def default_logger_level() -> LoggerLevel:
@@ -77,10 +105,10 @@ def set_global_log_level(level: LoggerLevel | None) -> None:
 
 
 class PacketPipeline:
-    name: ClassVar[str]
+    name: ClassVar[Pipeline]
 
     def __init__(self, device_id: int = -1) -> None:
-        self._native = _native.NativePipeline(self.name, device_id)
+        self._native = _native.NativePipeline(self.name.value, device_id)
 
     @property
     def consumed(self) -> bool:
@@ -88,50 +116,50 @@ class PacketPipeline:
 
 
 class CpuPacketPipeline(PacketPipeline):
-    name = "cpu"
+    name = Pipeline.CPU
 
 
 class MetalPacketPipeline(PacketPipeline):
-    name = "metal"
+    name = Pipeline.METAL
 
 
 class OpenGLPacketPipeline(PacketPipeline):
-    name = "opengl"
+    name = Pipeline.OPENGL
 
 
 class OpenCLPacketPipeline(PacketPipeline):
-    name = "opencl"
+    name = Pipeline.OPENCL
 
 
 class OpenCLKdePacketPipeline(PacketPipeline):
-    name = "opencl_kde"
+    name = Pipeline.OPENCL_KDE
 
 
 class CudaPacketPipeline(PacketPipeline):
-    name = "cuda"
+    name = Pipeline.CUDA
 
 
 class CudaKdePacketPipeline(PacketPipeline):
-    name = "cuda_kde"
+    name = Pipeline.CUDA_KDE
 
 
 class DumpPacketPipeline(PacketPipeline):
-    name = "dump"
+    name = Pipeline.DUMP
 
-    def depth_p0_tables(self) -> np.ndarray[Any, np.dtype[np.uint8]]:
+    def depth_p0_tables(self) -> npt.NDArray[np.uint8]:
         return self._native.depth_p0_tables()
 
-    def depth_x_table(self) -> np.ndarray[Any, np.dtype[np.float32]]:
+    def depth_x_table(self) -> npt.NDArray[np.float32]:
         return self._native.depth_x_table()
 
-    def depth_z_table(self) -> np.ndarray[Any, np.dtype[np.float32]]:
+    def depth_z_table(self) -> npt.NDArray[np.float32]:
         return self._native.depth_z_table()
 
-    def depth_lookup_table(self) -> np.ndarray[Any, np.dtype[np.int16]]:
+    def depth_lookup_table(self) -> npt.NDArray[np.int16]:
         return self._native.depth_lookup_table()
 
 
-PIPELINE_TYPES: Mapping[str, type[PacketPipeline]] = {
+_PIPELINE_TYPES: Mapping[Pipeline, type[PacketPipeline]] = {
     cls.name: cls
     for cls in (
         CpuPacketPipeline,
@@ -146,14 +174,17 @@ PIPELINE_TYPES: Mapping[str, type[PacketPipeline]] = {
 }
 
 
-def _coerce_pipeline(value: str | PacketPipeline | None) -> PacketPipeline | None:
-    if value is None or value == "auto":
+def _coerce_pipeline(
+    value: str | Pipeline | PacketPipeline | None,
+) -> PacketPipeline | None:
+    if value is None:
         return None
     if isinstance(value, PacketPipeline):
         return value
     try:
-        return PIPELINE_TYPES[str(value).lower()]()
-    except KeyError as error:
+        name = Pipeline(str(value).lower())
+        return None if name is Pipeline.AUTO else _PIPELINE_TYPES[name]()
+    except (KeyError, ValueError) as error:
         raise ValueError(f"unknown pipeline: {value!r}") from error
 
 
@@ -214,7 +245,7 @@ class Frame:
     @classmethod
     def from_array(
         cls,
-        array: np.ndarray[Any, Any],
+        array: _FrameArray,
         *,
         frame_type: FrameType | None = None,
         frame_format: FrameFormat | None = None,
@@ -225,7 +256,7 @@ class Frame:
         gamma: float = 0.0,
         status: int = 0,
     ) -> Frame:
-        value = np.asarray(array)
+        value = cast(_FrameArray, np.asarray(array))
         if value.size == 0 or any(dimension == 0 for dimension in value.shape):
             raise ValueError("frame arrays must not be empty")
         if frame_type is not None and frame_type not in tuple(FrameType):
@@ -316,16 +347,36 @@ class Frame:
         return FrameFormat(self._native.format)
 
     @property
-    def type(self) -> FrameType | None:
+    def frame_type(self) -> FrameType | None:
         return None if self._native.type < 0 else FrameType(self._native.type)
 
-    def to_numpy(self, *, copy: bool = False) -> np.ndarray[Any, Any]:
+    def to_numpy(self, *, copy: bool = False) -> _FrameArray:
         return self._native.to_numpy(copy)
 
+    @overload
+    def __array__(
+        self, dtype: None = None, copy: bool | None = None
+    ) -> _FrameArray: ...
 
-class FrameSet:
-    _NAMES: ClassVar[Mapping[str, FrameType]] = STREAM_NAMES
+    @overload
+    def __array__[ScalarT: np.generic](
+        self, dtype: np.dtype[ScalarT], copy: bool | None = None
+    ) -> npt.NDArray[ScalarT]: ...
 
+    def __array__(
+        self,
+        dtype: np.dtype[np.generic] | None = None,
+        copy: bool | None = None,
+    ) -> npt.NDArray[np.generic]:
+        array = self.to_numpy(copy=copy is True)
+        if dtype is None or array.dtype == dtype:
+            return array
+        if copy is False:
+            raise ValueError("a dtype conversion requires copy=True or copy=None")
+        return array.astype(dtype, copy=True)
+
+
+class FrameSet(Mapping[FrameType, Frame]):
     def __init__(
         self,
         native: _native.NativeFrameSet | None = None,
@@ -343,15 +394,10 @@ class FrameSet:
     def __exit__(self, *_: object) -> None:
         self.release()
 
-    def __getitem__(self, key: str | int | FrameType) -> Frame:
+    def __getitem__(self, key: FrameType) -> Frame:
         if self._released:
             raise DeviceStateError("frame set has already been released")
-        try:
-            frame_type = (
-                self._NAMES[key.lower()] if isinstance(key, str) else FrameType(key)
-            )
-        except (KeyError, TypeError, ValueError, AttributeError) as error:
-            raise KeyError(key) from error
+        frame_type = FrameType(key)
         if frame_type not in tuple(FrameType):
             raise KeyError(key)
         if self._native is not None:
@@ -365,10 +411,8 @@ class FrameSet:
         if self._released:
             return False
         try:
-            frame_type = (
-                self._NAMES[key.lower()] if isinstance(key, str) else FrameType(key)
-            )  # type: ignore[arg-type]
-        except (KeyError, TypeError, ValueError, AttributeError):
+            frame_type = FrameType(key)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
             return False
         if frame_type not in tuple(FrameType):
             return False
@@ -383,10 +427,6 @@ class FrameSet:
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
-
-    def items(self) -> Iterator[tuple[FrameType, Frame]]:
-        for frame_type in self:
-            yield frame_type, self[frame_type]
 
     @property
     def color(self) -> Frame:
@@ -435,9 +475,9 @@ class FrameSet:
         return self._released
 
 
-class SyncFrameListener:
+class FrameListener:
     def __init__(self, frame_types: FrameType) -> None:
-        self.frame_types = FrameType(frame_types)
+        self.frame_types: FrameType = FrameType(frame_types)
         if not self.frame_types or int(self.frame_types) & ~int(
             FrameType.COLOR | FrameType.IR | FrameType.DEPTH
         ):
@@ -462,7 +502,7 @@ class Device:
         self._configuration = DeviceConfig()
 
     def __enter__(self) -> Device:
-        if self.is_closed:
+        if self.closed:
             raise DeviceStateError("device is closed")
         return self
 
@@ -478,12 +518,12 @@ class Device:
         return self._native.firmware_version
 
     @property
-    def pipeline_name(self) -> str:
-        return self._native.pipeline_name
+    def pipeline_name(self) -> Pipeline:
+        return Pipeline(self._native.pipeline_name)
 
     @property
     def color_camera_params(self) -> ColorCameraParams:
-        return dataclass_from_mapping(
+        return _dataclass_from_mapping(
             ColorCameraParams, self._native.color_camera_params()
         )
 
@@ -493,7 +533,7 @@ class Device:
 
     @property
     def ir_camera_params(self) -> IrCameraParams:
-        return dataclass_from_mapping(IrCameraParams, self._native.ir_camera_params())
+        return _dataclass_from_mapping(IrCameraParams, self._native.ir_camera_params())
 
     @ir_camera_params.setter
     def ir_camera_params(self, value: IrCameraParams) -> None:
@@ -510,7 +550,7 @@ class Device:
         The device offers no read-back; before the first assignment this
         reports the library defaults, which the core is assumed to share.
         """
-        if self.is_closed:
+        if self.closed:
             raise DeviceStateError("device is closed")
         return self._configuration
 
@@ -518,10 +558,10 @@ class Device:
     def configuration(self, value: DeviceConfig) -> None:
         self.set_configuration(value)
 
-    def set_color_listener(self, listener: SyncFrameListener) -> None:
+    def set_color_listener(self, listener: FrameListener) -> None:
         self._native.set_color_listener(listener._native)
 
-    def set_depth_listener(self, listener: SyncFrameListener) -> None:
+    def set_depth_listener(self, listener: FrameListener) -> None:
         self._native.set_depth_listener(listener._native)
 
     def set_color_auto_exposure(self, compensation: float = 0.0) -> None:
@@ -558,15 +598,15 @@ class Device:
         self._native.close()
 
     @property
-    def is_running(self) -> bool:
+    def running(self) -> bool:
         return self._native.is_running
 
     @property
-    def is_closed(self) -> bool:
+    def closed(self) -> bool:
         return self._native.is_closed
 
 
-class Freenect2:
+class Context:
     VENDOR_ID = 0x045E
     PRODUCT_ID = 0x02D8
     PREVIEW_PRODUCT_ID = 0x02C4
@@ -587,7 +627,7 @@ class Freenect2:
         self,
         name: str | int | None = None,
         *,
-        pipeline: str | PacketPipeline | None = "auto",
+        pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
     ) -> Device:
         selected = _coerce_pipeline(pipeline)
         return Device(
@@ -598,7 +638,7 @@ class Freenect2:
         )
 
 
-class Freenect2Replay:
+class ReplayContext:
     def __init__(self) -> None:
         self._native = _native.NativeReplayContext()
 
@@ -607,7 +647,7 @@ class Freenect2Replay:
         filenames: str | PathLike[str] | Iterable[str | PathLike[str]],
         *,
         calibration: ReplayCalibration | None = None,
-        pipeline: str | PacketPipeline | None = "auto",
+        pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
     ) -> Device:
         if isinstance(filenames, (str, PathLike)):
             paths = [fspath(filenames)]
@@ -634,7 +674,7 @@ class RegistrationResult:
     undistorted: Frame
     registered: Frame
     big_depth: Frame | None = None
-    color_depth_map: np.ndarray[Any, np.dtype[np.int32]] | None = None
+    color_depth_map: npt.NDArray[np.int32] | None = None
 
 
 class Registration:
@@ -744,15 +784,15 @@ class Registration:
 class Camera:
     def __init__(
         self,
-        context: Freenect2 | Freenect2Replay,
+        context: Context | ReplayContext,
         device: Device,
-        listener: SyncFrameListener,
-        streams: tuple[str, ...],
+        listener: FrameListener,
+        streams: tuple[Stream, ...],
     ) -> None:
-        self.context = context
-        self.device = device
-        self.listener = listener
-        self.streams = streams
+        self.context: Context | ReplayContext = context
+        self.device: Device = device
+        self.listener: FrameListener = listener
+        self.streams: tuple[Stream, ...] = streams
         self._closed = False
 
     @classmethod
@@ -760,11 +800,11 @@ class Camera:
         cls,
         *,
         device: str | int | None = None,
-        pipeline: str | PacketPipeline | None = "auto",
-        streams: Iterable[str] = ("color", "depth"),
+        pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        streams: Iterable[str | Stream] = (Stream.COLOR, Stream.DEPTH),
     ) -> Camera:
         names = cls._normalize_streams(streams)
-        context = Freenect2()
+        context = Context()
         opened = context.open_device(device, pipeline=pipeline)
         return cls._start(context, opened, names)
 
@@ -773,14 +813,14 @@ class Camera:
         cls,
         path: str | PathLike[str],
         *,
-        pipeline: str | PacketPipeline | None = "auto",
-        streams: Iterable[str] | None = None,
+        pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        streams: Iterable[str | Stream] | None = None,
     ) -> Camera:
         from .recording import RecordingBundle
 
         bundle = RecordingBundle.open(path)
         names = cls._normalize_streams(bundle.streams if streams is None else streams)
-        context = Freenect2Replay()
+        context = ReplayContext()
         opened = context.open_device(
             bundle.frame_paths(names),
             calibration=bundle.calibration,
@@ -789,30 +829,36 @@ class Camera:
         return cls._start(context, opened, names)
 
     @staticmethod
-    def _normalize_streams(streams: Iterable[str]) -> tuple[str, ...]:
-        names = tuple(dict.fromkeys(str(stream).lower() for stream in streams))
-        if not names or any(name not in STREAM_NAMES for name in names):
+    def _normalize_streams(streams: Iterable[str | Stream]) -> tuple[Stream, ...]:
+        try:
+            names = tuple(
+                dict.fromkeys(Stream(str(stream).lower()) for stream in streams)
+            )
+        except ValueError as error:
+            raise ValueError("streams must contain color, ir, and/or depth") from error
+        if not names:
             raise ValueError("streams must contain color, ir, and/or depth")
         return names
 
     @classmethod
     def _start(
         cls,
-        context: Freenect2 | Freenect2Replay,
+        context: Context | ReplayContext,
         device: Device,
-        streams: tuple[str, ...],
+        streams: tuple[Stream, ...],
     ) -> Camera:
         mask = FrameType(0)
         for stream in streams:
-            mask |= STREAM_NAMES[stream]
-        listener = SyncFrameListener(mask)
+            mask |= _STREAM_TYPES[stream]
+        listener = FrameListener(mask)
         try:
-            if "color" in streams:
+            if Stream.COLOR in streams:
                 device.set_color_listener(listener)
-            if "ir" in streams or "depth" in streams:
+            if Stream.IR in streams or Stream.DEPTH in streams:
                 device.set_depth_listener(listener)
             device.start(
-                rgb="color" in streams, depth=("ir" in streams or "depth" in streams)
+                rgb=Stream.COLOR in streams,
+                depth=(Stream.IR in streams or Stream.DEPTH in streams),
             )
         except Exception:
             device.close()
@@ -828,17 +874,17 @@ class Camera:
         self.close()
 
     @property
-    def pipeline(self) -> str:
+    def pipeline(self) -> Pipeline:
         return self.device.pipeline_name
 
-    def capture(self, *, timeout: float | None = None, copy: bool = False) -> FrameSet:
+    def capture(self, *, timeout: float | None = 2.0, copy: bool = False) -> FrameSet:
         if self._closed:
             raise DeviceStateError("camera is closed")
         frames = self.listener.wait(timeout)
         return frames.detached_copy() if copy else frames
 
     def frames(
-        self, *, timeout: float | None = None, copy: bool = False
+        self, *, timeout: float | None = 2.0, copy: bool = False
     ) -> Iterator[FrameSet]:
         while not self._closed:
             yield self.capture(timeout=timeout, copy=copy)

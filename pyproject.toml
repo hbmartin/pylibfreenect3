@@ -1,73 +1,146 @@
 [build-system]
-requires = ["setuptools>=80", "wheel", "Cython>=3.2.8", "numpy>=2.2"]
-build-backend = "setuptools.build_meta"
+requires = [
+  "scikit-build-core>=1.0,<2",
+  "Cython>=3.2.8,<3.3",
+  "cython-cmake>=0.2.2,<0.3",
+  "numpy>=2.2",
+]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "pylibfreenect3"
-version = "0.3.0"
+version = "1.0.0"
 description = "Safe, modern Python bindings for libfreenect2-metal"
 readme = "README.md"
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE.md"]
 authors = [{name = "Ryuichi Yamamoto"}, {name = "pylibfreenect3 contributors"}]
 dependencies = ["numpy>=2.2"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Operating System :: MacOS :: MacOS X",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Cython",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering",
+  "Typing :: Typed",
 ]
-
-[project.optional-dependencies]
-test = ["pytest>=8", "pytest-cov>=5"]
-build = [
-  "build>=1.2",
-  "cibuildwheel==4.1.1",
-  "delocate==0.13.0; sys_platform == 'darwin'",
-  "auditwheel==6.7.0; sys_platform == 'linux'",
-]
-docs = ["sphinx>=8", "sphinx-rtd-theme>=3"]
 
 [project.urls]
 Repository = "https://github.com/hbmartin/pylibfreenect3"
 Issues = "https://github.com/hbmartin/pylibfreenect3/issues"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-include-package-data = false
+[dependency-groups]
+build = [
+  "cibuildwheel==4.1.1",
+  "delocate==0.13.0; sys_platform == 'darwin'",
+  "auditwheel==6.7.0; sys_platform == 'linux'",
+  "twine>=6.1,<7",
+]
+test = ["pytest>=8.4,<9", "pytest-cov>=6.2,<8"]
+lint = ["ruff>=0.12,<0.16", "cython-lint>=0.16,<0.17"]
+types = ["mypy>=1.17,<2", "pyright>=1.1.403,<2"]
+docs = ["sphinx>=8.2,<10", "sphinx-rtd-theme>=3,<4"]
+dev = [
+  {include-group = "build"},
+  {include-group = "test"},
+  {include-group = "lint"},
+  {include-group = "types"},
+  {include-group = "docs"},
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.uv]
+required-version = ">=0.11,<0.12"
+default-groups = ["dev"]
 
-[tool.setuptools.package-data]
-pylibfreenect3 = ["py.typed", "licenses/*"]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/pylibfreenect3"]
+wheel.exclude = ["**/*.pyx", "**/*.pxd", "**/*.cpp", "**/__pycache__/**"]
+wheel.install-dir = ""
+sdist.reproducible = true
+sdist.include = [
+  "CMakeLists.txt",
+  "cmake/FindFreenect2.cmake",
+  "src/pylibfreenect3/_native.pyx",
+  "src/pylibfreenect3/libfreenect2.pxd",
+  "src/pylibfreenect3/licenses/*",
+]
+sdist.exclude = [
+  ".DS_Store",
+  ".venv",
+  ".github/**",
+  "build/**",
+  "dist/**",
+  "reviews_triage/**",
+  "triage_decisions.db",
+  "src/pylibfreenect3/_native.cpp",
+  "src/pylibfreenect3/_native.*.so",
+  "tests/.DS_Store",
+  "tests/__pycache__",
+  "**/__pycache__/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["hardware: requires a Kinect v2 device"]
-addopts = "-ra"
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--cov=pylibfreenect3",
+  "--cov-report=term-missing",
+  "--cov-fail-under=80",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["pylibfreenect3"]
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise AssertionError", "raise NotImplementedError"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["src/pylibfreenect3/_native.cpp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B018"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["pylibfreenect3"]
+mypy_path = ["src"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["src/pylibfreenect3"]
+exclude = ["src/pylibfreenect3/_native.pyx", "src/pylibfreenect3/libfreenect2.pxd"]
 
 [tool.cibuildwheel]
-build = ["cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*"]
+build = ["cp312-*", "cp313-*", "cp314-*"]
 skip = ["*-win32", "*-win_amd64", "*-musllinux_*", "cp*t-*"]
-test-requires = ["pytest>=8"]
-test-command = "pytest {project}/tests -m 'not hardware'"
+build-frontend = "build[uv]"
+test-command = "uv run --isolated --no-project --with {wheel} --with pytest --with pytest-cov pytest {project}/tests -m 'not hardware'"
 before-all = "bash {project}/tools/build_wheel_dependencies.sh {project}/vendor/libfreenect2-metal"
-environment = {LIBFREENECT2_INSTALL_PREFIX = "/tmp/pylibfreenect3-wheel-prefix", PYLIBF3_WHEEL_PREFIX = "/tmp/pylibfreenect3-wheel-prefix", MACOSX_DEPLOYMENT_TARGET = "11.0"}
+environment = {Freenect2_ROOT = "/tmp/pylibfreenect3-wheel-prefix", PYLIBF3_WHEEL_PREFIX = "/tmp/pylibfreenect3-wheel-prefix", MACOSX_DEPLOYMENT_TARGET = "11.0"}
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
-repair-wheel-command = "delocate-wheel --require-archs arm64 -w {dest_dir} {wheel}"
+repair-wheel-command = "uv run --no-project --with delocate==0.13.0 delocate-wheel --require-archs arm64 -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
 manylinux-x86_64-image = "manylinux_2_28"
-repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+repair-wheel-command = "uv run --no-project --with auditwheel==6.7.0 auditwheel repair -w {dest_dir} {wheel}"
