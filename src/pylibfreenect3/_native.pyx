@@ -778,6 +778,8 @@ cdef class NativeDeviceHandle:
             float_value = float(value)
             with nogil:
                 self.ptr.setColorSetting(native_command, float_value)
+        # `bool` here is libcpp.bool, so Python bools are excluded by
+        # identity against True/False instead of isinstance.
         elif (isinstance(value, (int, np.integer)) and value is not True and
               value is not False and not isinstance(value, np.bool_)):
             if not 0 <= int(value) <= 0xFFFFFFFF:
@@ -1018,6 +1020,9 @@ cdef class NativeReplayContext:
 
 
 cdef class NativeRegistrationHandle:
+    # Deliberately not fork-guarded: registration is pure CPU math over
+    # tables copied at construction, so unlike device, listener, and frame
+    # state it is safe to use and free in a forked child.
     cdef lf.NativeRegistration *ptr
 
     def __cinit__(self, ir_params, color_params):

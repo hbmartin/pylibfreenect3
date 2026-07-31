@@ -14,6 +14,8 @@
   and observable queue statistics.
 - Reject native camera resources inherited across `fork()` and document the
   multiprocessing `spawn` boundary.
+- `Frame.from_array` now rejects read-only arrays because native frames
+  expose writable data; pass a writable copy for mapped or frozen inputs.
 - Added ownership stress coverage, hardware RSS soaks, and an OpenCV/offline
   registration cookbook.
 - Replaced the legacy build with `pyproject.toml`, Cython 3, C++17,

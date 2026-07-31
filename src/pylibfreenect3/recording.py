@@ -30,7 +30,12 @@ _STOP_WRITER = object()
 
 @dataclass(frozen=True, slots=True)
 class RecordingStats:
-    """Snapshot of frame-set throughput for a recording writer."""
+    """Snapshot of frame-set throughput for a recording writer.
+
+    ``failed`` counts frame sets that were not persisted because a background
+    write failed; after the first failure every subsequent frame set is
+    counted here without a write attempt.
+    """
 
     submitted: int
     written: int
@@ -70,7 +75,12 @@ def _safe_child(root: Path, relative: str) -> Path:
 
 
 class RecordingWriter:
-    """Atomically writes raw dump frames and calibration as schema-v1 bundle."""
+    """Atomically writes raw dump frames and calibration as schema-v1 bundle.
+
+    A writer expects a single producer thread: ``write``, ``flush``, and
+    ``close`` must not be called concurrently. Only the internal worker
+    thread touches the filesystem in parallel with the producer.
+    """
 
     def __init__(
         self,
@@ -349,7 +359,16 @@ class RecordingWriter:
     def _stop_worker(self) -> None:
         if self._queue is None or self._worker is None:
             return
-        self._queue.put(_STOP_WRITER)
+        # The worker exits only after consuming the sentinel, so a put cannot
+        # block for long while the worker is alive; the liveness check keeps
+        # this loop from hanging on a full queue if the worker ever gains an
+        # early exit path.
+        while self._worker.is_alive():
+            try:
+                self._queue.put(_STOP_WRITER, timeout=1.0)
+                break
+            except Full:
+                continue
         self._worker.join()
         self._worker = None
         self._queue = None
