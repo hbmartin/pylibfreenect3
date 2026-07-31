@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import os
 import weakref
 
 import numpy as np
@@ -9,6 +10,57 @@ import pytest
 
 import pylibfreenect3 as f3
 from pylibfreenect3 import _native
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_native_resources_fail_fast_when_inherited_after_fork() -> None:
+    listener = f3.SyncFrameListener(f3.FrameType.COLOR)
+    context = f3.Freenect2()
+    pipeline = f3.CpuPacketPipeline()
+    replay = f3.Freenect2Replay()
+    device = replay.open_device(["missing_color_1_1.jpg"], pipeline=pipeline)
+    native_frames = _native._testing_frame_set()
+    frame = native_frames.get(int(f3.FrameType.DEPTH))
+    read_fd, write_fd = os.pipe()
+
+    child_pid = os.fork()
+    if child_pid == 0:
+        os.close(read_fd)
+        checks = {
+            "context": context.enumerate_devices,
+            "device": lambda: device.is_closed,
+            "frame": lambda: frame.width,
+            "frame set": lambda: native_frames.contains(int(f3.FrameType.DEPTH)),
+            "listener": listener.has_new_frame,
+            "pipeline": lambda: pipeline.consumed,
+        }
+        failures: list[str] = []
+        for label, operation in checks.items():
+            try:
+                operation()
+            except f3.DeviceStateError as error:
+                if "cannot be used after fork" not in str(error):
+                    failures.append(f"{label}: unexpected error: {error}")
+            except BaseException as error:
+                failures.append(f"{label}: {type(error).__name__}: {error}")
+            else:
+                failures.append(f"{label}: inherited resource was accepted")
+        os.write(write_fd, "\n".join(failures).encode())
+        os.close(write_fd)
+        os._exit(1 if failures else 0)
+
+    os.close(write_fd)
+    try:
+        payload = os.read(read_fd, 16_384).decode()
+        _, status = os.waitpid(child_pid, 0)
+    finally:
+        os.close(read_fd)
+        del frame
+        gc.collect()
+        native_frames.release()
+        device.close()
+
+    assert os.waitstatus_to_exitcode(status) == 0, payload
 
 
 def test_runtime_identity_and_pipeline_queries() -> None:

@@ -9,6 +9,9 @@ from libcpp.map cimport map
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
+cdef extern from "unistd.h":
+    int c_getpid "getpid"() noexcept nogil
+
 import numpy as np
 cimport numpy as cnp
 
@@ -21,6 +24,16 @@ from .errors import (
 )
 
 cnp.import_array()
+
+
+cdef void _require_process(long owner_pid) except *:
+    cdef long current_pid = c_getpid()
+    if owner_pid != current_pid:
+        raise DeviceStateError(
+            "native camera resources cannot be used after fork; "
+            f"create them in the current process (created in PID {owner_pid}, "
+            f"current PID {current_pid})"
+        )
 
 
 cdef object _text(string value):
@@ -111,12 +124,14 @@ cdef class NativePipeline:
     cdef bint consumed
     cdef bint device_closed
     cdef object requested_name
+    cdef long owner_pid
 
     def __cinit__(self, name, int device_id=-1):
         self.ptr = NULL
         self.consumed = False
         self.device_closed = False
         self.requested_name = str(name)
+        self.owner_pid = c_getpid()
         cdef string encoded = str(name).encode("utf-8")
         try:
             with nogil:
@@ -134,11 +149,13 @@ cdef class NativePipeline:
             raise BackendUnavailableError(f"pipeline {name!r} is not usable on this machine")
 
     def __dealloc__(self):
-        if self.ptr != NULL and not self.consumed:
+        if (self.owner_pid == c_getpid() and self.ptr != NULL and
+                not self.consumed):
             del self.ptr
             self.ptr = NULL
 
     cdef lf.NativePacketPipeline *_consume(self) except NULL:
+        _require_process(self.owner_pid)
         if self.ptr == NULL or self.consumed:
             raise DeviceStateError("packet pipelines are single-use")
         self.consumed = True
@@ -157,15 +174,18 @@ cdef class NativePipeline:
 
     @property
     def name(self):
+        _require_process(self.owner_pid)
         if self.ptr == NULL:
             return self.requested_name
         return _text(self.ptr.getName())
 
     @property
     def is_consumed(self):
+        _require_process(self.owner_pid)
         return self.consumed != 0
 
     cdef void _require_dump(self) except *:
+        _require_process(self.owner_pid)
         if self.device_closed:
             raise DeviceStateError("dump tables are unavailable after the device is closed")
         if self.ptr == NULL or self.name != "dump":
@@ -226,6 +246,7 @@ cdef class NativeFrame:
     cdef object parent
     cdef object numpy_owner
     cdef int frame_type
+    cdef long owner_pid
 
     def __cinit__(self):
         self.ptr = NULL
@@ -233,14 +254,16 @@ cdef class NativeFrame:
         self.parent = None
         self.numpy_owner = None
         self.frame_type = -1
+        self.owner_pid = c_getpid()
 
     def __dealloc__(self):
-        if self.owns_ptr and self.ptr != NULL:
-            del self.ptr
+        if self.owner_pid == c_getpid():
+            if self.owns_ptr and self.ptr != NULL:
+                del self.ptr
+            if self.parent is not None:
+                (<NativeFrameSet>self.parent)._drop_borrow()
         self.ptr = NULL
-        if self.parent is not None:
-            (<NativeFrameSet>self.parent)._drop_borrow()
-            self.parent = None
+        self.parent = None
 
     @staticmethod
     def allocate(size_t width, size_t height, size_t bytes_per_pixel, int frame_type=-1,
@@ -314,6 +337,7 @@ cdef class NativeFrame:
         return result
 
     cdef void _check(self) except *:
+        _require_process(self.owner_pid)
         if self.ptr == NULL:
             raise DeviceStateError("frame is no longer valid")
 
@@ -369,6 +393,7 @@ cdef class NativeFrame:
 
     @property
     def type(self):
+        _require_process(self.owner_pid)
         return self.frame_type
 
     def to_numpy(self, bint copy=False):
@@ -423,6 +448,7 @@ cdef class NativeFrameSet:
     cdef bint release_requested
     cdef bint released
     cdef bint owns_frames
+    cdef long owner_pid
 
     def __cinit__(self):
         self.listener = None
@@ -431,9 +457,11 @@ cdef class NativeFrameSet:
         self.release_requested = False
         self.released = False
         self.owns_frames = False
+        self.owner_pid = c_getpid()
 
     def __dealloc__(self):
-        if self.filled and not self.released:
+        if (self.owner_pid == c_getpid() and self.filled and
+                not self.released):
             if self.listener is not None:
                 (<NativeSyncFrameListener>self.listener)._release_native(self)
             elif self.owns_frames:
@@ -465,6 +493,7 @@ cdef class NativeFrameSet:
                 self.released = True
 
     def get(self, int frame_type):
+        _require_process(self.owner_pid)
         if self.release_requested:
             raise DeviceStateError("frame set release has already been requested")
         cdef lf.NativeFrameType key = _frame_type(frame_type)
@@ -474,6 +503,7 @@ cdef class NativeFrameSet:
         return _borrow_frame(deref(it).second, frame_type, self)
 
     def contains(self, int frame_type):
+        _require_process(self.owner_pid)
         if self.release_requested:
             return False
         cdef lf.NativeFrameType key = _frame_type(frame_type)
@@ -481,20 +511,24 @@ cdef class NativeFrameSet:
         return it != self.frames.end() and deref(it).second != NULL
 
     def release(self):
+        _require_process(self.owner_pid)
         if not self.release_requested:
             self.release_requested = True
         self._maybe_release()
 
     @property
     def is_released(self):
+        _require_process(self.owner_pid)
         return self.release_requested != 0
 
     @property
     def release_complete(self):
+        _require_process(self.owner_pid)
         return self.released != 0
 
     @property
     def entry_count(self):
+        _require_process(self.owner_pid)
         return self.frames.size()
 
 
@@ -518,23 +552,28 @@ def _testing_frame_set():
 
 cdef class NativeSyncFrameListener:
     cdef lf.NativeSyncListener *ptr
+    cdef long owner_pid
 
     def __cinit__(self, unsigned int frame_types):
+        self.owner_pid = c_getpid()
         self.ptr = new lf.NativeSyncListener(frame_types)
 
     def __dealloc__(self):
-        if self.ptr != NULL:
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
             del self.ptr
             self.ptr = NULL
 
     @property
     def _listener_address(self):
+        _require_process(self.owner_pid)
         return <size_t><lf.NativeFrameListener *>self.ptr
 
     def has_new_frame(self):
+        _require_process(self.owner_pid)
         return self.ptr.hasNewFrame() != 0
 
     def wait(self, timeout=None):
+        _require_process(self.owner_pid)
         cdef NativeFrameSet result = NativeFrameSet()
         cdef bint ok = True
         cdef int milliseconds
@@ -554,6 +593,7 @@ cdef class NativeSyncFrameListener:
         return result
 
     cdef void _release_native(self, NativeFrameSet frame_set):
+        _require_process(self.owner_pid)
         if self.ptr != NULL and frame_set.filled and not frame_set.released:
             with nogil:
                 self.ptr.release(frame_set.frames)
@@ -568,6 +608,7 @@ cdef class NativeDeviceHandle:
     cdef object depth_listener
     cdef bint running
     cdef bint closed
+    cdef long owner_pid
 
     def __cinit__(self):
         self.ptr = NULL
@@ -577,10 +618,12 @@ cdef class NativeDeviceHandle:
         self.depth_listener = None
         self.running = False
         self.closed = False
+        self.owner_pid = c_getpid()
 
     def __dealloc__(self):
         cdef bint ignored
-        if self.ptr != NULL and not self.closed:
+        if (self.owner_pid == c_getpid() and self.ptr != NULL and
+                not self.closed):
             if self.running:
                 with nogil:
                     ignored = self.ptr.stop()
@@ -588,11 +631,12 @@ cdef class NativeDeviceHandle:
                 self.ptr.setColorFrameListener(NULL)
                 self.ptr.setIrAndDepthFrameListener(NULL)
                 ignored = self.ptr.close()
-        if self.pipeline is not None:
+        if self.owner_pid == c_getpid() and self.pipeline is not None:
             (<NativePipeline>self.pipeline)._device_closed()
         self.ptr = NULL
 
     cdef void _check(self) except *:
+        _require_process(self.owner_pid)
         if self.ptr == NULL or self.closed:
             raise DeviceStateError("device is closed")
 
@@ -669,12 +713,14 @@ cdef class NativeDeviceHandle:
 
     def set_color_listener(self, NativeSyncFrameListener listener not None):
         self._check_stopped()
+        _require_process(listener.owner_pid)
         with nogil:
             self.ptr.setColorFrameListener(<lf.NativeFrameListener *>listener.ptr)
         self.color_listener = listener
 
     def set_depth_listener(self, NativeSyncFrameListener listener not None):
         self._check_stopped()
+        _require_process(listener.owner_pid)
         with nogil:
             self.ptr.setIrAndDepthFrameListener(<lf.NativeFrameListener *>listener.ptr)
         self.depth_listener = listener
@@ -761,6 +807,7 @@ cdef class NativeDeviceHandle:
         self.running = True
 
     def stop(self):
+        _require_process(self.owner_pid)
         if self.ptr == NULL or self.closed:
             return
         cdef bint ok = True
@@ -772,6 +819,7 @@ cdef class NativeDeviceHandle:
             raise DeviceStateError("device failed to stop")
 
     def close(self):
+        _require_process(self.owner_pid)
         if self.closed or self.ptr == NULL:
             return
         cdef bint stop_ok = True
@@ -797,10 +845,12 @@ cdef class NativeDeviceHandle:
 
     @property
     def is_running(self):
+        _require_process(self.owner_pid)
         return self.running != 0
 
     @property
     def is_closed(self):
+        _require_process(self.owner_pid)
         return self.closed != 0
 
 
@@ -820,28 +870,34 @@ cdef NativeDeviceHandle _wrap_device(lf.NativeDevice *ptr, object owner, NativeP
 
 cdef class NativeFreenect2Context:
     cdef lf.NativeFreenect2 *ptr
+    cdef long owner_pid
 
     def __cinit__(self):
+        self.owner_pid = c_getpid()
         self.ptr = new lf.NativeFreenect2()
 
     def __dealloc__(self):
-        if self.ptr != NULL:
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
             del self.ptr
             self.ptr = NULL
 
     def enumerate_devices(self):
+        _require_process(self.owner_pid)
         cdef int count
         with nogil:
             count = self.ptr.enumerateDevices()
         return count
 
     def device_serial_number(self, int index):
+        _require_process(self.owner_pid)
         return _text(self.ptr.getDeviceSerialNumber(index))
 
     def default_device_serial_number(self):
+        _require_process(self.owner_pid)
         return _text(self.ptr.getDefaultDeviceSerialNumber())
 
     def open_device(self, name=None, NativePipeline pipeline=None):
+        _require_process(self.owner_pid)
         cdef lf.NativeDevice *device = NULL
         cdef lf.NativePacketPipeline *native_pipeline = NULL
         cdef string serial
@@ -873,16 +929,19 @@ cdef class NativeFreenect2Context:
 
 cdef class NativeReplayContext:
     cdef lf.NativeReplay *ptr
+    cdef long owner_pid
 
     def __cinit__(self):
+        self.owner_pid = c_getpid()
         self.ptr = new lf.NativeReplay()
 
     def __dealloc__(self):
-        if self.ptr != NULL:
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
             del self.ptr
             self.ptr = NULL
 
     def open_device(self, filenames, calibration=None, NativePipeline pipeline=None):
+        _require_process(self.owner_pid)
         cdef vector[string] paths
         cdef object filename
         for filename in filenames:
