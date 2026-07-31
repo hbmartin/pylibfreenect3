@@ -183,6 +183,9 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Test every macOS wheel on a Kinect v2
         shell: bash
+        env:
+          PYLIBF3_HARDWARE_SOAK_FRAMES: "900"
+          PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB: "128"
         run: |
           set -euo pipefail
           for wheel in wheelhouse/*.whl; do

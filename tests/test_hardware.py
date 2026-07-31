@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import gc
+import os
+import resource
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +20,24 @@ from pylibfreenect3 import (
     Registration,
     SyncFrameListener,
 )
+
+
+def _positive_environment_integer(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _maximum_rss_bytes() -> int:
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(value if sys.platform == "darwin" else value * 1024)
 
 
 @pytest.mark.hardware
@@ -48,6 +69,44 @@ def test_kinect_capture_100_frames(pipeline: str) -> None:
                     assert registered.undistorted.to_numpy().shape == (424, 512)
                     assert registered.registered.to_numpy().shape == (424, 512, 4)
         assert all(right > left for left, right in zip(sequences, sequences[1:]))
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("pipeline", ["metal", "cpu"])
+def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
+    frame_count = _positive_environment_integer(
+        "PYLIBF3_HARDWARE_SOAK_FRAMES", 900
+    )
+    max_growth_mb = _positive_environment_integer(
+        "PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB", 128
+    )
+    warmup_frames = min(90, max(30, frame_count // 10))
+
+    with Camera.open(pipeline=pipeline, streams=("color", "ir", "depth")) as camera:
+        for _ in range(warmup_frames):
+            with camera.capture(timeout=2.0) as frames:
+                assert np.isfinite(frames.depth.to_numpy()).any()
+        gc.collect()
+        baseline = _maximum_rss_bytes()
+
+        previous_sequence = -1
+        for index in range(frame_count):
+            with camera.capture(timeout=2.0) as frames:
+                depth = frames.depth.to_numpy()
+                assert depth.shape == (424, 512)
+                assert frames.depth.sequence > previous_sequence
+                previous_sequence = frames.depth.sequence
+            del depth
+            if index and index % 300 == 0:
+                gc.collect()
+
+        gc.collect()
+        growth = _maximum_rss_bytes() - baseline
+
+    assert growth <= max_growth_mb * 1024 * 1024, (
+        f"{pipeline} capture RSS grew by {growth / (1024 * 1024):.1f} MiB "
+        f"over {frame_count} frames"
+    )
 
 
 @pytest.mark.hardware

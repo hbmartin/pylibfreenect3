@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import importlib.util
 import os
+import warnings
 import weakref
 
 import numpy as np
@@ -23,7 +24,9 @@ def test_native_resources_fail_fast_when_inherited_after_fork() -> None:
     frame = native_frames.get(int(f3.FrameType.DEPTH))
     read_fd, write_fd = os.pipe()
 
-    child_pid = os.fork()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        child_pid = os.fork()
     if child_pid == 0:
         os.close(read_fd)
         checks = {
@@ -249,6 +252,18 @@ def test_native_frame_set_defers_release_until_last_array_dies() -> None:
     gc.collect()
     assert native.release_complete
     assert native.entry_count == 0
+
+
+@pytest.mark.parametrize("copy", [False, True])
+def test_native_frame_set_release_stress(copy: bool) -> None:
+    for _ in range(2_000):
+        native = _native._testing_frame_set()
+        frame = native.get(int(f3.FrameType.DEPTH))
+        array = frame.to_numpy(copy=copy)
+        native.release()
+        assert array.shape == (1, 2)
+        del frame, array, native
+    gc.collect()
 
 
 def test_frame_set_composite_and_unknown_keys_are_missing() -> None:
