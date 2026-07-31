@@ -6,6 +6,7 @@ except PackageNotFoundError:
     __version__ = "0.3.0.dev0"
 
 from .api import (
+    STREAM_NAMES,
     Camera,
     CpuPacketPipeline,
     CudaKdePacketPipeline,
@@ -58,6 +59,7 @@ from .types import (
 )
 
 __all__ = [
+    "STREAM_NAMES",
     "BackendUnavailableError",
     "Camera",
     "ColorCameraParams",

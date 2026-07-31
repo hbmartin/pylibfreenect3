@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import itertools
 import os
 import resource
 import sys
@@ -19,6 +20,12 @@ from pylibfreenect3 import (
     RecordingWriter,
     Registration,
     SyncFrameListener,
+    available_pipelines,
+)
+
+AVAILABLE_PIPELINES = available_pipelines()
+METAL_UNAVAILABLE = pytest.mark.skipif(
+    "metal" not in AVAILABLE_PIPELINES, reason="Metal backend is unavailable"
 )
 
 
@@ -41,11 +48,17 @@ def _maximum_rss_bytes() -> int:
 
 
 @pytest.mark.hardware
-@pytest.mark.parametrize("pipeline", ["metal", "auto"])
+@pytest.mark.parametrize(
+    "pipeline",
+    [pytest.param("metal", marks=METAL_UNAVAILABLE), "auto"],
+)
 def test_kinect_capture_100_frames(pipeline: str) -> None:
     sequences: list[int] = []
     with Camera.open(pipeline=pipeline, streams=("color", "ir", "depth")) as camera:
-        assert camera.pipeline == "metal"
+        if pipeline == "metal":
+            assert camera.pipeline == "metal"
+        else:
+            assert camera.pipeline in AVAILABLE_PIPELINES
         registration = Registration(
             camera.device.ir_camera_params,
             camera.device.color_camera_params,
@@ -68,15 +81,16 @@ def test_kinect_capture_100_frames(pipeline: str) -> None:
                     registered = registration.apply(frames.color, frames.depth)
                     assert registered.undistorted.to_numpy().shape == (424, 512)
                     assert registered.registered.to_numpy().shape == (424, 512, 4)
-        assert all(right > left for left, right in zip(sequences, sequences[1:]))
+        assert all(right > left for left, right in itertools.pairwise(sequences))
 
 
 @pytest.mark.hardware
-@pytest.mark.parametrize("pipeline", ["metal", "cpu"])
+@pytest.mark.parametrize(
+    "pipeline",
+    [pytest.param("metal", marks=METAL_UNAVAILABLE), "cpu"],
+)
 def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
-    frame_count = _positive_environment_integer(
-        "PYLIBF3_HARDWARE_SOAK_FRAMES", 900
-    )
+    frame_count = _positive_environment_integer("PYLIBF3_HARDWARE_SOAK_FRAMES", 900)
     max_growth_mb = _positive_environment_integer(
         "PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB", 128
     )
@@ -143,6 +157,7 @@ def test_cpu_capture_configuration_restart_and_outstanding_array() -> None:
 
 
 @pytest.mark.hardware
+@METAL_UNAVAILABLE
 def test_repeated_open_close() -> None:
     for _ in range(5):
         camera = Camera.open(pipeline="metal", streams=("depth",))
@@ -159,7 +174,8 @@ def test_dump_recording_and_cpu_metal_replay(tmp_path: Path) -> None:
         with RecordingWriter(recording_path, camera) as writer:
             writer.capture(10, timeout=2.0)
 
-    for pipeline in ("cpu", "metal"):
+    replay_pipelines = ("cpu", "metal") if "metal" in AVAILABLE_PIPELINES else ("cpu",)
+    for pipeline in replay_pipelines:
         with Camera.open_recording(recording_path, pipeline=pipeline) as replay:
             with replay.capture(timeout=5.0) as frames:
                 assert replay.pipeline == pipeline

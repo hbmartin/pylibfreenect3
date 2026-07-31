@@ -13,10 +13,16 @@ from typing import Any, Iterable, Literal
 
 import numpy as np
 
-from .api import Camera, DumpPacketPipeline, FrameFormat, FrameSet, FrameType
+from .api import (
+    STREAM_NAMES,
+    Camera,
+    DumpPacketPipeline,
+    FrameFormat,
+    FrameSet,
+    FrameType,
+)
 from .errors import DeviceStateError, RecordingFormatError
 from .types import ColorCameraParams, IrCameraParams, ReplayCalibration
-
 
 SCHEMA_VERSION = 1
 _STOP_WRITER = object()
@@ -113,47 +119,56 @@ class RecordingWriter:
         self._working = Path(
             tempfile.mkdtemp(prefix=f".{self.path.name}.partial-", dir=self.path.parent)
         )
-        (self._working / "calibration").mkdir()
-        (self._working / "frames").mkdir()
+        try:
+            (self._working / "calibration").mkdir()
+            (self._working / "frames").mkdir()
 
-        calibration = {
-            "color": asdict(self.camera.device.color_camera_params),
-            "ir": asdict(self.camera.device.ir_camera_params),
-            "p0_tables": self._write_array(
-                "calibration/p0.bin", pipeline.depth_p0_tables()
-            ),
-            "x_table": self._write_array("calibration/x.bin", pipeline.depth_x_table()),
-            "z_table": self._write_array("calibration/z.bin", pipeline.depth_z_table()),
-            "lookup_table": self._write_array(
-                "calibration/lookup.bin", pipeline.depth_lookup_table()
-            ),
-        }
-        from .api import core_api_version, core_revision, core_version
+            calibration = {
+                "color": asdict(self.camera.device.color_camera_params),
+                "ir": asdict(self.camera.device.ir_camera_params),
+                "p0_tables": self._write_array(
+                    "calibration/p0.bin", pipeline.depth_p0_tables()
+                ),
+                "x_table": self._write_array(
+                    "calibration/x.bin", pipeline.depth_x_table()
+                ),
+                "z_table": self._write_array(
+                    "calibration/z.bin", pipeline.depth_z_table()
+                ),
+                "lookup_table": self._write_array(
+                    "calibration/lookup.bin", pipeline.depth_lookup_table()
+                ),
+            }
+            from .api import core_api_version, core_revision, core_version
 
-        self._manifest = {
-            "schema_version": SCHEMA_VERSION,
-            "core": {
-                "version": core_version(),
-                "api_version": core_api_version(),
-                "revision": core_revision(),
-            },
-            "device": {
-                "serial": self.camera.device.serial_number,
-                "firmware": self.camera.device.firmware_version,
-                "pipeline": self.camera.device.pipeline_name,
-            },
-            "enabled_streams": list(self.camera.streams),
-            "calibration": calibration,
-            "frame_index": [],
-        }
-        if self.queue_size:
-            self._queue = Queue(maxsize=self.queue_size)
-            self._worker = Thread(
-                target=self._worker_main,
-                name="pylibfreenect3-recording-writer",
-                daemon=True,
-            )
-            self._worker.start()
+            self._manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "core": {
+                    "version": core_version(),
+                    "api_version": core_api_version(),
+                    "revision": core_revision(),
+                },
+                "device": {
+                    "serial": self.camera.device.serial_number,
+                    "firmware": self.camera.device.firmware_version,
+                    "pipeline": self.camera.device.pipeline_name,
+                },
+                "enabled_streams": list(self.camera.streams),
+                "calibration": calibration,
+                "frame_index": [],
+            }
+            if self.queue_size:
+                self._queue = Queue(maxsize=self.queue_size)
+                worker = Thread(
+                    target=self._worker_main,
+                    name="pylibfreenect3-recording-writer",
+                    daemon=True,
+                )
+                worker.start()
+                self._worker = worker
+        except BaseException:
+            self.abort()
+            raise
         return self
 
     def __exit__(self, exc_type: object, *_: object) -> None:
@@ -391,6 +406,7 @@ class RecordingBundle:
         self.manifest = manifest
         self.calibration = calibration
         self.streams = tuple(str(value) for value in manifest["enabled_streams"])
+        self._verified: set[Path] = set()
 
     @classmethod
     def open(cls, path: str | os.PathLike[str]) -> RecordingBundle:
@@ -431,7 +447,7 @@ class RecordingBundle:
             not isinstance(streams, list)
             or not streams
             or len(streams) != len(set(streams))
-            or any(stream not in FrameSet._NAMES for stream in streams)
+            or any(stream not in STREAM_NAMES for stream in streams)
         ):
             raise RecordingFormatError("recording has an invalid stream list")
         calibration_data = manifest.get("calibration")
@@ -496,7 +512,7 @@ class RecordingBundle:
 
     def frame_paths(self, streams: Iterable[str]) -> list[str]:
         selected = set(streams)
-        if not selected or any(stream not in FrameSet._NAMES for stream in selected):
+        if not selected or any(stream not in STREAM_NAMES for stream in selected):
             raise RecordingFormatError("requested replay streams are invalid")
         if not selected <= set(self.streams):
             raise RecordingFormatError("requested replay streams were not recorded")
@@ -526,9 +542,16 @@ class RecordingBundle:
                 if path in seen:
                     raise RecordingFormatError(f"frame index repeats a path: {path}")
                 seen.add(path)
-                data = path.read_bytes()
-                if len(data) != int(entry["size"]) or _sha256(data) != entry["sha256"]:
-                    raise RecordingFormatError(f"frame failed integrity check: {path}")
+                if path not in self._verified:
+                    data = path.read_bytes()
+                    if (
+                        len(data) != int(entry["size"])
+                        or _sha256(data) != entry["sha256"]
+                    ):
+                        raise RecordingFormatError(
+                            f"frame failed integrity check: {path}"
+                        )
+                    self._verified.add(path)
                 if not isinstance(entry["timestamp"], int) or not isinstance(
                     entry["sequence"], int
                 ):

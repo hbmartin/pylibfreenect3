@@ -28,7 +28,12 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
-build = ["build>=1.2", "cibuildwheel==4.1.1", "delocate==0.13.0; sys_platform == 'darwin'"]
+build = [
+  "build>=1.2",
+  "cibuildwheel==4.1.1",
+  "delocate==0.13.0; sys_platform == 'darwin'",
+  "auditwheel==6.7.0; sys_platform == 'linux'",
+]
 docs = ["sphinx>=8", "sphinx-rtd-theme>=3"]
 
 [project.urls]

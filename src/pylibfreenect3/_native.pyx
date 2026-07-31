@@ -12,6 +12,7 @@ from libcpp.vector cimport vector
 cdef extern from "unistd.h":
     int c_getpid "getpid"() noexcept nogil
 
+import math
 import numpy as np
 cimport numpy as cnp
 
@@ -291,6 +292,8 @@ cdef class NativeFrame:
         cdef cnp.ndarray value = np.asarray(array)
         if not value.flags.c_contiguous:
             raise ValueError("frame arrays must be C-contiguous")
+        if not value.flags.writeable:
+            raise ValueError("frame arrays must be writable")
         if value.dtype not in (np.dtype(np.uint8), np.dtype(np.float32)):
             raise TypeError("frame arrays must use uint8 or float32")
         if frame_format == <int>lf.FORMAT_RAW:
@@ -577,17 +580,21 @@ cdef class NativeSyncFrameListener:
         cdef NativeFrameSet result = NativeFrameSet()
         cdef bint ok = True
         cdef int milliseconds
+        cdef double seconds
         result.listener = self
         if timeout is None:
             with nogil:
                 self.ptr.waitForNewFrame(result.frames)
         else:
-            if timeout < 0:
+            seconds = float(timeout)
+            if seconds < 0:
                 raise ValueError("timeout must be non-negative")
-            milliseconds = max(0, int(round(float(timeout) * 1000.0)))
+            milliseconds = 0 if seconds == 0 else max(1, math.ceil(seconds * 1000.0))
             with nogil:
                 ok = self.ptr.waitForNewFrame(result.frames, milliseconds)
         if not ok:
+            result.filled = True
+            self._release_native(result)
             raise FrameTimeoutError("timed out waiting for synchronized frames")
         result.filled = True
         return result
@@ -753,17 +760,22 @@ cdef class NativeDeviceHandle:
         cdef lf.NativeColorSetting native_command = <lf.NativeColorSetting>command
         cdef float float_value
         cdef uint32_t int_value
-        if isinstance(value, float):
-            float_value = value
+        if isinstance(value, (float, np.floating)):
+            float_value = float(value)
             with nogil:
                 self.ptr.setColorSetting(native_command, float_value)
-        else:
-            int_value = value
+        elif (isinstance(value, (int, np.integer)) and value is not True and
+              value is not False and not isinstance(value, np.bool_)):
+            if not 0 <= int(value) <= 0xFFFFFFFF:
+                raise ValueError("integer color settings must fit in uint32")
+            int_value = int(value)
             with nogil:
                 self.ptr.setColorSetting(native_command, int_value)
+        else:
+            raise TypeError("color settings must be an integer or floating-point value")
 
     def get_color_setting(self, int command, bint as_float=False):
-        self._check_stopped()
+        self._check()
         cdef lf.NativeColorSetting native_command = <lf.NativeColorSetting>command
         cdef float float_value
         cdef uint32_t int_value
@@ -1006,18 +1018,30 @@ cdef class NativeRegistrationHandle:
             del self.ptr
             self.ptr = NULL
 
+    cdef void _check(self) except *:
+        if self.ptr == NULL:
+            raise DeviceStateError("registration handle is closed")
+
     def apply_point(self, int dx, int dy, float dz):
+        self._check()
         cdef float cx = 0
         cdef float cy = 0
         with nogil:
             self.ptr.apply(dx, dy, dz, cx, cy)
         return cx, cy
 
-    def apply(self, NativeFrame rgb, NativeFrame depth, NativeFrame undistorted,
-              NativeFrame registered, bint enable_filter=True,
+    def apply(self, NativeFrame rgb not None, NativeFrame depth not None,
+              NativeFrame undistorted not None, NativeFrame registered not None,
+              bint enable_filter=True,
               NativeFrame bigdepth=None, object color_depth_map=None):
+        self._check()
+        rgb._check()
+        depth._check()
+        undistorted._check()
+        registered._check()
         cdef lf.NativeFrame *big = NULL
         if bigdepth is not None:
+            bigdepth._check()
             big = bigdepth.ptr
         cdef cnp.ndarray mapping
         cdef int *mapping_ptr = NULL
@@ -1031,11 +1055,17 @@ cdef class NativeRegistrationHandle:
             self.ptr.apply(rgb.ptr, depth.ptr, undistorted.ptr, registered.ptr,
                            enable_filter, big, mapping_ptr)
 
-    def undistort_depth(self, NativeFrame depth, NativeFrame undistorted):
+    def undistort_depth(self, NativeFrame depth not None,
+                        NativeFrame undistorted not None):
+        self._check()
+        depth._check()
+        undistorted._check()
         with nogil:
             self.ptr.undistortDepth(depth.ptr, undistorted.ptr)
 
-    def point_xyz(self, NativeFrame undistorted, int row, int column):
+    def point_xyz(self, NativeFrame undistorted not None, int row, int column):
+        self._check()
+        undistorted._check()
         cdef float x = 0
         cdef float y = 0
         cdef float z = 0
@@ -1043,7 +1073,11 @@ cdef class NativeRegistrationHandle:
             self.ptr.getPointXYZ(undistorted.ptr, row, column, x, y, z)
         return x, y, z
 
-    def point_xyz_rgb(self, NativeFrame undistorted, NativeFrame registered, int row, int column):
+    def point_xyz_rgb(self, NativeFrame undistorted not None,
+                      NativeFrame registered not None, int row, int column):
+        self._check()
+        undistorted._check()
+        registered._check()
         cdef float x = 0
         cdef float y = 0
         cdef float z = 0
@@ -1051,6 +1085,8 @@ cdef class NativeRegistrationHandle:
         with nogil:
             self.ptr.getPointXYZRGB(undistorted.ptr, registered.ptr, row, column, x, y, z, rgb)
         cdef unsigned char *channels = <unsigned char *>&rgb
+        if registered.ptr.format == lf.FORMAT_BGRX:
+            return x, y, z, channels[2], channels[1], channels[0]
         return x, y, z, channels[0], channels[1], channels[2]
 
 

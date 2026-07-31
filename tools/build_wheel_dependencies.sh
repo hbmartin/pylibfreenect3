@@ -33,7 +33,9 @@ download_and_verify() {
   local url=$1
   local output=$2
   local expected=$3
-  curl --fail --location --silent --show-error "$url" --output "$output"
+  curl --fail --location --silent --show-error \
+    --retry 3 --connect-timeout 30 --max-time 600 \
+    "$url" --output "$output"
   local actual
   if command -v shasum >/dev/null 2>&1; then
     actual=$(shasum -a 256 "$output" | awk '{print $1}')

@@ -216,7 +216,8 @@ from pylibfreenect3 import Freenect2, MetalPacketPipeline
 
 context = Freenect2()
 pipeline = MetalPacketPipeline()
-device = context.open_device(pipeline=pipeline)
+with context.open_device(pipeline=pipeline) as device:
+    print(device.serial_number)
 ```
 
 ## Recording and replay

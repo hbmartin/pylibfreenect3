@@ -7,7 +7,7 @@ on:
       core_ref:
         description: libfreenect2-metal ref (release builds must use v0.3.0)
         required: false
-        default: main
+        default: cda644a1613156d5e347ce1c1fcf0c6ba06e7bad
   push:
     tags:
       - v0.3.0
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.3.0' || 'main') }}
+  CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.3.0' || 'cda644a1613156d5e347ce1c1fcf0c6ba06e7bad') }}
 
 jobs:
   wheels:
@@ -33,10 +33,10 @@ jobs:
             artifact: wheels-manylinux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: hbmartin/libfreenect2-metal
           ref: ${{ env.CORE_REF }}
@@ -45,7 +45,7 @@ jobs:
       - name: Verify coordinated release tag
         if: startsWith(github.ref, 'refs/tags/')
         run: test "$(git -C vendor/libfreenect2-metal describe --tags --exact-match)" = v0.3.0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
       - name: Install pinned wheel tooling
@@ -56,7 +56,7 @@ jobs:
           PYLIBF3_REQUIRE_CORE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
       - name: Inspect repaired dependency closure
         run: python tools/verify_wheel.py wheelhouse/*.whl
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ${{ matrix.artifact }}
           path: wheelhouse/*.whl
@@ -65,16 +65,16 @@ jobs:
   sdist:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: hbmartin/libfreenect2-metal
           ref: ${{ env.CORE_REF }}
           path: vendor/libfreenect2-metal
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
       - name: Build pinned native inputs
@@ -85,7 +85,7 @@ jobs:
         run: |
           python -m pip install build==1.3.0
           LIBFREENECT2_INSTALL_PREFIX=/tmp/pylibfreenect3-wheel-prefix python -m build --sdist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -97,16 +97,16 @@ jobs:
       ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: hbmartin/libfreenect2-metal
           ref: ${{ env.CORE_REF }}
           path: vendor/libfreenect2-metal
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
       - name: Install native build dependencies
@@ -152,14 +152,14 @@ jobs:
     needs: wheels
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: wheels-manylinux-x86_64
           path: wheelhouse
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
       - name: Build documentation against the repaired wheel
@@ -173,14 +173,16 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, kinect-v2]
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: wheels-macos-arm64
           path: wheelhouse
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          enable-cache: false
       - name: Test every macOS wheel on a Kinect v2
         shell: bash
         env:
@@ -207,13 +209,13 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: sdist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

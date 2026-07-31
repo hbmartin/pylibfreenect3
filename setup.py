@@ -43,7 +43,22 @@ def _pkg_config_layout() -> tuple[list[str], list[str]] | None:
             includes.append(token[2:])
         elif token.startswith("-L"):
             libraries.append(token[2:])
-    return (includes, libraries) if includes and libraries else None
+
+    def variable_path(name: str) -> list[str]:
+        queried = subprocess.run(
+            ["pkg-config", f"--variable={name}", "freenect2"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        value = queried.stdout.strip()
+        return [value] if queried.returncode == 0 and value else []
+
+    if not includes:
+        includes = variable_path("includedir")
+    if not libraries:
+        libraries = variable_path("libdir")
+    return includes, libraries
 
 
 def _linked_libraries(executable: Path) -> str:
@@ -75,7 +90,10 @@ def _core_library(libraries: list[str]) -> Path:
 
 def _probe_core(includes: list[str], libraries: list[str]) -> dict[str, str]:
     source = r"""
+#include <cstddef>
 #include <iostream>
+#include <string>
+#include <vector>
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/packet_pipeline.h>
 int main() {
@@ -112,7 +130,10 @@ int main() {
         command.append("-lfreenect2")
         command.extend(f"-Wl,-rpath,{value}" for value in libraries)
         command.extend(shlex.split(os.environ.get("LDFLAGS", "")))
-        core_links = _linked_libraries(_core_library(libraries))
+        try:
+            core_links = _linked_libraries(_core_library(libraries))
+        except RuntimeError as error:
+            core_links = f"core will be resolved by the platform linker: {error}"
         compiled = subprocess.run(command, text=True, capture_output=True, check=False)
         if compiled.returncode:
             raise RuntimeError(
@@ -169,57 +190,63 @@ def discover_core() -> tuple[list[str], list[str]]:
         candidates.append((str(prefix), _prefix_layout(prefix)))
 
     attempted: list[str] = []
+    rejections: list[str] = []
     for source_name, layout in candidates:
         attempted.append(source_name)
         if layout is None:
             continue
         includes, libraries = layout
-        for include in includes:
-            config = Path(include) / "libfreenect2" / "config.h"
-            if not config.is_file():
-                continue
-            contents = config.read_text("utf-8")
-            match = re.search(
-                r'^#define\s+LIBFREENECT2_VERSION\s+"([^"]+)"', contents, re.M
+        configs = [
+            Path(include) / "libfreenect2" / "config.h"
+            for include in includes
+            if (Path(include) / "libfreenect2" / "config.h").is_file()
+        ]
+        source_rejections: list[str] = []
+        if includes and not configs:
+            source_rejections.append(
+                f"{source_name}: no libfreenect2/config.h under {includes}"
             )
-            if match is None or not match.group(1).startswith("0.3."):
-                found = "unknown" if match is None else match.group(1)
-                raise RuntimeError(
-                    "pylibfreenect3 requires libfreenect2 API 0.3.x.\n"
-                    f"  architecture: {platform.machine()}\n"
-                    f"  discovery source: {source_name}\n"
-                    f"  headers: {includes}\n"
-                    f"  libraries: {libraries}\n"
-                    f"  header version: {found} at {config}"
+        for config in configs or ([None] if not includes else []):
+            header_version = "compiler-default search path"
+            if config is not None:
+                contents = config.read_text("utf-8")
+                match = re.search(
+                    r'^#define\s+LIBFREENECT2_VERSION\s+"([^"]+)"',
+                    contents,
+                    re.MULTILINE,
                 )
+                if match is None or not match.group(1).startswith("0.3."):
+                    found = "unknown" if match is None else match.group(1)
+                    source_rejections.append(
+                        f"{source_name}: header version {found} at {config}; "
+                        "requires 0.3.x"
+                    )
+                    continue
+                header_version = f"{match.group(1)} at {config}"
             try:
                 runtime = _probe_core(includes, libraries)
             except RuntimeError as error:
-                raise RuntimeError(
-                    "pylibfreenect3 found headers but could not validate the linked core.\n"
-                    f"  architecture: {platform.machine()}\n"
-                    f"  source: {source_name}\n"
-                    f"  headers: {includes}\n"
-                    f"  libraries: {libraries}\n{error}"
-                ) from error
+                source_rejections.append(
+                    f"{source_name}: headers={includes}, libraries={libraries}: {error}"
+                )
+                continue
             if (
                 not runtime.get("runtime_version", "").startswith("0.3.")
                 or runtime.get("runtime_api") != "3"
             ):
-                raise RuntimeError(
-                    "pylibfreenect3 requires a 0.3.x runtime with API 3.\n"
-                    f"  headers: {match.group(1)} at {config}\n"
-                    f"  runtime: {runtime.get('runtime_version', 'unknown')}\n"
-                    f"  runtime ABI/API: {runtime.get('runtime_api', 'unknown')}\n"
-                    f"  linked libraries:\n{runtime['linked_libraries']}"
+                source_rejections.append(
+                    f"{source_name}: header={header_version}, "
+                    f"runtime={runtime.get('runtime_version', 'unknown')}, "
+                    f"API={runtime.get('runtime_api', 'unknown')}"
                 )
+                continue
             print(
                 "pylibfreenect3 build configuration:\n"
                 f"  architecture: {platform.machine()}\n"
                 f"  discovery source: {source_name}\n"
                 f"  headers: {includes}\n"
                 f"  libraries: {libraries}\n"
-                f"  header version: {match.group(1)}\n"
+                f"  header version: {header_version}\n"
                 f"  runtime version: {runtime['runtime_version']}\n"
                 f"  runtime ABI/API: {runtime['runtime_api']}\n"
                 f"  build revision: {runtime['build_revision']}\n"
@@ -227,11 +254,20 @@ def discover_core() -> tuple[list[str], list[str]]:
                 f"  linked libraries:\n{runtime['linked_libraries']}"
             )
             return includes, libraries
+        if source_name == "LIBFREENECT2_INSTALL_PREFIX" and source_rejections:
+            raise RuntimeError("\n".join(source_rejections))
+        rejections.extend(source_rejections)
+    rejection_details = (
+        "\n  rejected candidates:\n  - " + "\n  - ".join(rejections)
+        if rejections
+        else ""
+    )
     raise RuntimeError(
         "libfreenect2 0.3.x was not found. Set LIBFREENECT2_INSTALL_PREFIX, install "
         "freenect2.pc, or install the core under a standard prefix.\n"
         f"  architecture: {platform.machine()}\n"
         f"  attempted: {', '.join(attempted)}"
+        f"{rejection_details}"
     )
 
 
@@ -240,13 +276,13 @@ extra_compile_args = ["-std=c++17"]
 extra_link_args: list[str] = []
 if platform.system() == "Darwin":
     extra_compile_args.append("-stdlib=libc++")
-    extra_link_args.extend(
-        [f"-Wl,-rpath,{library_dirs[0]}", "-Wl,-rpath,@loader_path/.dylibs"]
-    )
+    if library_dirs:
+        extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
+    extra_link_args.append("-Wl,-rpath,@loader_path/.dylibs")
 elif platform.system() == "Linux":
-    extra_link_args.extend(
-        [f"-Wl,-rpath,{library_dirs[0]}", "-Wl,-rpath,$ORIGIN/../pylibfreenect3.libs"]
-    )
+    if library_dirs:
+        extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
+    extra_link_args.append("-Wl,-rpath,$ORIGIN/../pylibfreenect3.libs")
 
 extension = Extension(
     "pylibfreenect3._native",

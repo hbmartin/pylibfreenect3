@@ -136,9 +136,27 @@ def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
     assert device.ir_camera_params == ir_params
     device.configuration = f3.DeviceConfig(min_depth=0.7, max_depth=5.5)
     assert device.configuration == f3.DeviceConfig(min_depth=0.7, max_depth=5.5)
+    device.set_color_setting(
+        f3.ColorSettingCommand.SET_INTEGRATION_TIME, np.float32(1.25)
+    )
+    device.set_color_setting(f3.ColorSettingCommand.SET_INTEGRATION_TIME, np.int64(2))
+    for invalid_integer in (-1, 2**32):
+        with pytest.raises(ValueError, match="fit in uint32"):
+            device.set_color_setting(
+                f3.ColorSettingCommand.SET_INTEGRATION_TIME, invalid_integer
+            )
+    for invalid_type in (True, np.bool_(True), "1"):
+        with pytest.raises(TypeError, match="integer or floating-point"):
+            device.set_color_setting(
+                f3.ColorSettingCommand.SET_INTEGRATION_TIME, invalid_type
+            )
     listener = f3.SyncFrameListener(f3.FrameType.COLOR)
     device.set_color_listener(listener)
     device.start(rgb=True, depth=False)
+    assert device.get_color_setting(f3.ColorSettingCommand.GET_INTEGRATION_TIME) == 0
+    with pytest.raises(f3.DeviceStateError, match="cannot change while streaming"):
+        device.configuration = f3.DeviceConfig(min_depth=0.9, max_depth=6.0)
+    assert device.configuration == f3.DeviceConfig(min_depth=0.7, max_depth=5.5)
     with pytest.raises(f3.FrameTimeoutError):
         listener.wait(timeout=0.001)
     device.stop()
@@ -214,18 +232,22 @@ def test_frame_formats_and_numpy_source_lifetime(
 
 
 def test_mismatched_array_layouts_are_rejected() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="array layout does not match FLOAT"):
         f3.Frame.from_array(
             np.zeros((2, 2), np.uint8), frame_format=f3.FrameFormat.FLOAT
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="BGRX arrays must have shape"):
         f3.Frame.from_array(
             np.zeros((2, 2, 3), np.uint8), frame_format=f3.FrameFormat.BGRX
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="raw frames use width=height=1"):
         f3.Frame.allocate(2, 2, 4, frame_format=f3.FrameFormat.RAW)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="frame arrays must not be empty"):
         f3.Frame.from_array(np.empty(0, np.uint8), frame_format=f3.FrameFormat.RAW)
+    read_only = np.zeros((2, 2), np.float32)
+    read_only.flags.writeable = False
+    with pytest.raises(ValueError, match="frame arrays must be writable"):
+        f3.Frame.from_array(read_only, frame_format=f3.FrameFormat.FLOAT)
 
 
 def test_native_frame_set_defers_release_until_last_array_dies() -> None:
@@ -267,6 +289,13 @@ def test_native_frame_set_release_stress(copy: bool) -> None:
 
 
 def test_frame_set_composite_and_unknown_keys_are_missing() -> None:
+    assert f3.STREAM_NAMES == {
+        "color": f3.FrameType.COLOR,
+        "ir": f3.FrameType.IR,
+        "depth": f3.FrameType.DEPTH,
+    }
+    with pytest.raises(TypeError):
+        f3.STREAM_NAMES["other"] = f3.FrameType.COLOR  # type: ignore[index]
     frames = f3.FrameSet(native=_native._testing_frame_set())
     assert f3.FrameType.COLOR | f3.FrameType.DEPTH not in frames
     assert 8 not in frames
@@ -284,6 +313,23 @@ def test_detached_copy_immediately_releases_native_capture() -> None:
     assert native.entry_count == 0
     assert detached.color.to_numpy().shape == (1, 2, 4)
     assert detached.depth.to_numpy().shape == (1, 2)
+
+
+def test_detached_copy_releases_source_when_copying_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = f3.Frame.from_array(
+        np.zeros((2, 2), np.float32), frame_type=f3.FrameType.DEPTH
+    )
+    frames = f3.FrameSet(copied={f3.FrameType.DEPTH: source})
+
+    def fail_copy(*_: object, **__: object) -> f3.Frame:
+        raise ValueError("simulated copy failure")
+
+    monkeypatch.setattr(f3.Frame, "from_array", fail_copy)
+    with pytest.raises(ValueError, match="simulated copy failure"):
+        frames.detached_copy()
+    assert frames.released
 
 
 def test_copied_frame_set_preserves_metadata_and_release_contract() -> None:
@@ -307,13 +353,13 @@ def test_copied_frame_set_preserves_metadata_and_release_contract() -> None:
 
 def test_typed_values_validate_inputs() -> None:
     assert f3.DeviceConfig().max_depth == 4.5
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="0 <= min_depth < max_depth"):
         f3.DeviceConfig(min_depth=2.0, max_depth=1.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="IR camera parameters must be finite"):
         f3.IrCameraParams(fx=float("nan"))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="color focal lengths must be non-negative"):
         f3.ColorCameraParams(fy=-1.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="reserved must be zero"):
         f3.LedSettings(0, reserved=1)
     assert [value.value for value in f3.FrameType] == [1, 2, 4]
     assert [value.value for value in f3.FrameFormat] == [0, 1, 2, 4, 5, 6]
@@ -374,8 +420,32 @@ def test_registration_overloads_with_synthetic_frames() -> None:
     assert result.color_depth_map is not None
     assert result.color_depth_map.shape == (424, 512)
     assert np.isfinite(registration.point_xyz(result.undistorted, 212, 256)).all()
-    assert (
-        len(registration.point_xyz_rgb(result.undistorted, result.registered, 212, 256))
-        == 6
+    registered_data = np.zeros((424, 512, 4), np.uint8)
+    registered_data[212, 256, :3] = (1, 2, 3)
+    registered_bgrx = f3.Frame.from_array(
+        registered_data, frame_format=f3.FrameFormat.BGRX
     )
+    registered_rgbx = f3.Frame.from_array(
+        registered_data.copy(), frame_format=f3.FrameFormat.RGBX
+    )
+    assert registration.point_xyz_rgb(result.undistorted, registered_bgrx, 212, 256)[
+        3:
+    ] == (3, 2, 1)
+    assert registration.point_xyz_rgb(result.undistorted, registered_rgbx, 212, 256)[
+        3:
+    ] == (1, 2, 3)
     assert registration.undistort_depth(depth).to_numpy().shape == (424, 512)
+
+
+def test_native_registration_rejects_none_frames() -> None:
+    native = _native.NativeRegistrationHandle(
+        f3.IrCameraParams(), f3.ColorCameraParams()
+    )
+    with pytest.raises(TypeError):
+        native.apply(None, None, None, None)
+    with pytest.raises(TypeError):
+        native.undistort_depth(None, None)
+    with pytest.raises(TypeError):
+        native.point_xyz(None, 0, 0)
+    with pytest.raises(TypeError):
+        native.point_xyz_rgb(None, None, 0, 0)
