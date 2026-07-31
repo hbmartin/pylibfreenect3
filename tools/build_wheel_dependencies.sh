@@ -143,6 +143,6 @@ cp "$work_dir/libusb/COPYING" "$license_dir/libusb-COPYING.txt"
 cp "$work_dir/turbojpeg/LICENSE.md" "$license_dir/libjpeg-turbo-LICENSE.md"
 
 echo "wheel dependency prefix: $wheel_prefix"
-echo "libusb commit: 87a55632db62c9bdc58cd31d3ccfa673f1bb017f"
-echo "libjpeg-turbo commit: c85e6b905bf237038faa936dab160ebfc5da0344"
+echo "libusb version: ${libusb_version}"
+echo "libjpeg-turbo version: ${turbojpeg_version}"
 echo "libfreenect2-metal commit: $(git -C "$core_source" rev-parse HEAD)"

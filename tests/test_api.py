@@ -187,6 +187,10 @@ def test_logger_utilities_cover_every_level() -> None:
     f3.set_global_log_level(f3.default_logger_level())
 
 
+@pytest.mark.skipif(
+    "CI" not in os.environ,
+    reason="user environments may legitimately have pylibfreenect2 installed",
+)
 def test_old_import_namespace_is_absent() -> None:
     assert importlib.util.find_spec("pylibfreenect2") is None
 

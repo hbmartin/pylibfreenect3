@@ -1,9 +1,10 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
 
+from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport Py_INCREF
 from cython.operator cimport dereference as deref, preincrement as inc
 from libc.stdint cimport uint32_t
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 from libcpp cimport bool
 from libcpp.map cimport map
 from libcpp.string cimport string
@@ -25,6 +26,8 @@ from .errors import (
 )
 
 cnp.import_array()
+
+cdef int _WAIT_SLICE_MS = 100
 
 
 cdef void _require_process(long owner_pid) except *:
@@ -274,6 +277,8 @@ cdef class NativeFrame:
         cdef NativeFrame result = NativeFrame()
         result.ptr = new lf.NativeFrame(width, height, bytes_per_pixel, NULL)
         result.owns_ptr = True
+        if result.ptr.data != NULL:
+            memset(result.ptr.data, 0, width * height * bytes_per_pixel)
         result.frame_type = frame_type
         result.ptr.format = <lf.NativeFrameFormat>frame_format
         result.ptr.timestamp = timestamp
@@ -583,8 +588,17 @@ cdef class NativeSyncFrameListener:
         cdef double seconds
         result.listener = self
         if timeout is None:
-            with nogil:
-                self.ptr.waitForNewFrame(result.frames)
+            # The C++ wait cannot be interrupted once entered, so wait in
+            # bounded slices and let Python signal handlers (Ctrl+C) run
+            # between them.
+            while True:
+                with nogil:
+                    ok = self.ptr.waitForNewFrame(result.frames, _WAIT_SLICE_MS)
+                if ok:
+                    break
+                with nogil:
+                    self.ptr.release(result.frames)
+                PyErr_CheckSignals()
         else:
             seconds = float(timeout)
             if seconds < 0:

@@ -63,28 +63,18 @@ jobs:
           if-no-files-found: error
 
   sdist:
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: hbmartin/libfreenect2-metal
-          ref: ${{ env.CORE_REF }}
-          path: vendor/libfreenect2-metal
-          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
-      - name: Build pinned native inputs
-        run: bash tools/build_wheel_dependencies.sh vendor/libfreenect2-metal
-        env:
-          PYLIBF3_REQUIRE_CORE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
       - name: Build source distribution
         run: |
           python -m pip install build==1.3.0
-          LIBFREENECT2_INSTALL_PREFIX=/tmp/pylibfreenect3-wheel-prefix python -m build --sdist
+          python -m build --sdist
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: sdist

@@ -225,7 +225,7 @@ class RecordingWriter:
                 suffix = "jpg"
             else:
                 suffix = "depth"
-            data = frame.to_numpy(copy=True).tobytes(order="C")
+            data = frame.to_numpy().tobytes(order="C")
             relative = f"frames/{stream}_{frame.timestamp}_{frame.sequence}.{suffix}"
             if (
                 relative in self._scheduled_paths

@@ -5,6 +5,7 @@ import platform
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -271,29 +272,55 @@ def discover_core() -> tuple[list[str], list[str]]:
     )
 
 
-include_dirs, library_dirs = discover_core()
-extra_compile_args = ["-std=c++17"]
-extra_link_args: list[str] = []
-if platform.system() == "Darwin":
-    extra_compile_args.append("-stdlib=libc++")
-    if library_dirs:
-        extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
-    extra_link_args.append("-Wl,-rpath,@loader_path/.dylibs")
-elif platform.system() == "Linux":
-    if library_dirs:
-        extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
-    extra_link_args.append("-Wl,-rpath,$ORIGIN/../pylibfreenect3.libs")
+def _needs_native_core() -> bool:
+    """Whether this invocation compiles the extension.
 
-extension = Extension(
-    "pylibfreenect3._native",
-    ["src/pylibfreenect3/_native.pyx"],
-    include_dirs=[numpy.get_include(), *include_dirs],
-    library_dirs=library_dirs,
-    libraries=["freenect2"],
-    language="c++",
-    extra_compile_args=extra_compile_args,
-    extra_link_args=extra_link_args,
-    define_macros=[("NPY_NO_DEPRECATED_API", "NPY_2_0_API_VERSION")],
-)
+    Metadata-only commands (sdist, egg_info, ...) must not require an
+    installed libfreenect2; unknown commands default to probing so a missing
+    core fails loudly rather than producing a wheel without the extension.
+    """
+    arguments = set(sys.argv[1:])
+    native_commands = {
+        "bdist",
+        "bdist_wheel",
+        "build",
+        "build_ext",
+        "develop",
+        "editable_wheel",
+        "install",
+    }
+    metadata_only_commands = {"check", "clean", "dist_info", "egg_info", "sdist"}
+    if arguments & native_commands:
+        return True
+    return not arguments & metadata_only_commands
 
-setup(ext_modules=cythonize([extension], compiler_directives={"language_level": 3}))
+
+def _native_extensions() -> list:
+    include_dirs, library_dirs = discover_core()
+    extra_compile_args = ["-std=c++17"]
+    extra_link_args: list[str] = []
+    if platform.system() == "Darwin":
+        extra_compile_args.append("-stdlib=libc++")
+        if library_dirs:
+            extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
+        extra_link_args.append("-Wl,-rpath,@loader_path/.dylibs")
+    elif platform.system() == "Linux":
+        if library_dirs:
+            extra_link_args.append(f"-Wl,-rpath,{library_dirs[0]}")
+        extra_link_args.append("-Wl,-rpath,$ORIGIN/../pylibfreenect3.libs")
+
+    extension = Extension(
+        "pylibfreenect3._native",
+        ["src/pylibfreenect3/_native.pyx"],
+        include_dirs=[numpy.get_include(), *include_dirs],
+        library_dirs=library_dirs,
+        libraries=["freenect2"],
+        language="c++",
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_2_0_API_VERSION")],
+    )
+    return cythonize([extension], compiler_directives={"language_level": 3})
+
+
+setup(ext_modules=_native_extensions() if _needs_native_core() else [])

@@ -505,6 +505,11 @@ class Device:
 
     @property
     def configuration(self) -> DeviceConfig:
+        """Last configuration applied through this object.
+
+        The device offers no read-back; before the first assignment this
+        reports the library defaults, which the core is assumed to share.
+        """
         if self.is_closed:
             raise DeviceStateError("device is closed")
         return self._configuration
