@@ -1,13 +1,19 @@
 Getting started
 ===============
 
-See `examples/multiframe_listener.py <https://github.com/r9y9/pylibfreenect2/blob/master/examples/multiframe_listener.py>`_.
+The high-level API owns the context, device, listener, and pipeline::
 
-The example code demonstrates basic usage of pylibfreenect2. It requires a python binding of opencv for visualization.
-If you are using `Anaconda <https://www.continuum.io/>`_, you can install it by:
+   from pylibfreenect3 import Camera
 
-.. code::
+   with Camera.open(pipeline="auto", streams=("color", "depth")) as camera:
+       with camera.capture(timeout=2.0) as frames:
+           depth = frames.depth.to_numpy()
 
-    conda install opencv
+The NumPy array is a zero-copy view by default and keeps all required native
+state alive. ``copy=True`` creates independent storage and immediately releases
+the native capture. Releasing a frame set is idempotent and rejects new frame
+lookups.
 
-Have fun!
+Use ``Camera.frames()`` for synchronous iteration and ``Camera.open_recording``
+for schema-v1 bundles. Async capture and decoder-thread Python callbacks are
+not part of 0.3.

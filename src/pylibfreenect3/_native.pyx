@@ -1,0 +1,1017 @@
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
+
+from cpython.ref cimport Py_INCREF
+from cython.operator cimport dereference as deref, preincrement as inc
+from libc.stdint cimport uint32_t
+from libc.string cimport memcpy
+from libcpp cimport bool
+from libcpp.map cimport map
+from libcpp.string cimport string
+from libcpp.vector cimport vector
+
+import numpy as np
+cimport numpy as cnp
+
+from . cimport libfreenect2 as lf
+from .errors import (
+    BackendUnavailableError,
+    DeviceOpenError,
+    DeviceStateError,
+    FrameTimeoutError,
+)
+
+cnp.import_array()
+
+
+cdef object _text(string value):
+    return (<bytes>value).decode("utf-8", "replace")
+
+
+cdef lf.NativeFrameType _frame_type(int value):
+    if value == 1:
+        return lf.FRAME_COLOR
+    if value == 2:
+        return lf.FRAME_IR
+    if value == 4:
+        return lf.FRAME_DEPTH
+    raise ValueError(f"invalid frame type: {value}")
+
+
+cdef void _fill_color(lf.NativeDevice.ColorCameraParams *target, object source):
+    target.fx = source.fx
+    target.fy = source.fy
+    target.cx = source.cx
+    target.cy = source.cy
+    target.shift_d = source.shift_d
+    target.shift_m = source.shift_m
+    target.mx_x3y0 = source.mx_x3y0
+    target.mx_x0y3 = source.mx_x0y3
+    target.mx_x2y1 = source.mx_x2y1
+    target.mx_x1y2 = source.mx_x1y2
+    target.mx_x2y0 = source.mx_x2y0
+    target.mx_x0y2 = source.mx_x0y2
+    target.mx_x1y1 = source.mx_x1y1
+    target.mx_x1y0 = source.mx_x1y0
+    target.mx_x0y1 = source.mx_x0y1
+    target.mx_x0y0 = source.mx_x0y0
+    target.my_x3y0 = source.my_x3y0
+    target.my_x0y3 = source.my_x0y3
+    target.my_x2y1 = source.my_x2y1
+    target.my_x1y2 = source.my_x1y2
+    target.my_x2y0 = source.my_x2y0
+    target.my_x0y2 = source.my_x0y2
+    target.my_x1y1 = source.my_x1y1
+    target.my_x1y0 = source.my_x1y0
+    target.my_x0y1 = source.my_x0y1
+    target.my_x0y0 = source.my_x0y0
+
+
+cdef void _fill_ir(lf.NativeDevice.IrCameraParams *target, object source):
+    target.fx = source.fx
+    target.fy = source.fy
+    target.cx = source.cx
+    target.cy = source.cy
+    target.k1 = source.k1
+    target.k2 = source.k2
+    target.k3 = source.k3
+    target.p1 = source.p1
+    target.p2 = source.p2
+
+
+def core_version():
+    return _text(lf.getVersion())
+
+
+def core_api_version():
+    return int(lf.getApiVersion())
+
+
+def core_revision():
+    return _text(lf.getBuildRevision())
+
+
+def compiled_pipelines():
+    cdef vector[string] values
+    cdef size_t i
+    with nogil:
+        values = lf.getCompiledPacketPipelines()
+    return frozenset(_text(values[i]) for i in range(values.size()))
+
+
+def available_pipelines():
+    cdef vector[string] values
+    cdef size_t i
+    with nogil:
+        values = lf.getAvailablePacketPipelines()
+    return frozenset(_text(values[i]) for i in range(values.size()))
+
+
+cdef class NativePipeline:
+    cdef lf.NativePacketPipeline *ptr
+    cdef bint consumed
+    cdef bint device_closed
+    cdef object requested_name
+
+    def __cinit__(self, name, int device_id=-1):
+        self.ptr = NULL
+        self.consumed = False
+        self.device_closed = False
+        self.requested_name = str(name)
+        cdef string encoded = str(name).encode("utf-8")
+        try:
+            with nogil:
+                if encoded == b"auto":
+                    self.ptr = lf.createDefaultPacketPipeline()
+                else:
+                    self.ptr = lf.createPacketPipeline(encoded, device_id)
+        except Exception as error:
+            raise BackendUnavailableError(f"pipeline {name!r} could not be constructed") from error
+        if self.ptr == NULL:
+            raise BackendUnavailableError(f"pipeline {name!r} is not compiled")
+        if not self.ptr.good():
+            del self.ptr
+            self.ptr = NULL
+            raise BackendUnavailableError(f"pipeline {name!r} is not usable on this machine")
+
+    def __dealloc__(self):
+        if self.ptr != NULL and not self.consumed:
+            del self.ptr
+            self.ptr = NULL
+
+    cdef lf.NativePacketPipeline *_consume(self) except NULL:
+        if self.ptr == NULL or self.consumed:
+            raise DeviceStateError("packet pipelines are single-use")
+        self.consumed = True
+        return self.ptr
+
+    cdef void _open_failed(self):
+        self.ptr = NULL
+        self.device_closed = True
+
+    cdef void _attach(self):
+        self.device_closed = False
+
+    cdef void _device_closed(self):
+        self.device_closed = True
+        self.ptr = NULL
+
+    @property
+    def name(self):
+        if self.ptr == NULL:
+            return self.requested_name
+        return _text(self.ptr.getName())
+
+    @property
+    def is_consumed(self):
+        return self.consumed != 0
+
+    cdef void _require_dump(self) except *:
+        if self.device_closed:
+            raise DeviceStateError("dump tables are unavailable after the device is closed")
+        if self.ptr == NULL or self.name != "dump":
+            raise DeviceStateError("dump tables require a live DumpPacketPipeline")
+
+    def depth_p0_tables(self):
+        self._require_dump()
+        cdef size_t length = 0
+        cdef const unsigned char *data = (<lf.NativeDumpPipeline *>self.ptr).getDepthP0Tables(&length)
+        if data == NULL:
+            raise DeviceStateError("P0 tables are not ready")
+        cdef cnp.ndarray result = np.empty(length, dtype=np.uint8)
+        if length:
+            memcpy(cnp.PyArray_DATA(result), data, length)
+        return result
+
+    def depth_x_table(self):
+        self._require_dump()
+        cdef size_t length = 0
+        cdef const float *data = (<lf.NativeDumpPipeline *>self.ptr).getDepthXTable(&length)
+        if data == NULL:
+            raise DeviceStateError("X table is not ready")
+        cdef cnp.ndarray result = np.empty(length, dtype=np.float32)
+        if length:
+            memcpy(cnp.PyArray_DATA(result), data, length * sizeof(float))
+        return result
+
+    def depth_z_table(self):
+        self._require_dump()
+        cdef size_t length = 0
+        cdef const float *data = (<lf.NativeDumpPipeline *>self.ptr).getDepthZTable(&length)
+        if data == NULL:
+            raise DeviceStateError("Z table is not ready")
+        cdef cnp.ndarray result = np.empty(length, dtype=np.float32)
+        if length:
+            memcpy(cnp.PyArray_DATA(result), data, length * sizeof(float))
+        return result
+
+    def depth_lookup_table(self):
+        self._require_dump()
+        cdef size_t length = 0
+        cdef const short *data = (<lf.NativeDumpPipeline *>self.ptr).getDepthLookupTable(&length)
+        if data == NULL:
+            raise DeviceStateError("lookup table is not ready")
+        cdef cnp.ndarray result = np.empty(length, dtype=np.int16)
+        if length:
+            memcpy(cnp.PyArray_DATA(result), data, length * sizeof(short))
+        return result
+
+
+cdef class NativeFrameSet
+cdef class NativeSyncFrameListener
+
+
+cdef class NativeFrame:
+    cdef lf.NativeFrame *ptr
+    cdef bint owns_ptr
+    cdef object parent
+    cdef object numpy_owner
+    cdef int frame_type
+
+    def __cinit__(self):
+        self.ptr = NULL
+        self.owns_ptr = False
+        self.parent = None
+        self.numpy_owner = None
+        self.frame_type = -1
+
+    def __dealloc__(self):
+        if self.owns_ptr and self.ptr != NULL:
+            del self.ptr
+        self.ptr = NULL
+        if self.parent is not None:
+            (<NativeFrameSet>self.parent)._drop_borrow()
+            self.parent = None
+
+    @staticmethod
+    def allocate(size_t width, size_t height, size_t bytes_per_pixel, int frame_type=-1,
+                 int frame_format=0, uint32_t timestamp=0, uint32_t sequence=0,
+                 float exposure=0.0, float gain=0.0, float gamma=0.0,
+                 uint32_t status=0):
+        cdef NativeFrame result = NativeFrame()
+        result.ptr = new lf.NativeFrame(width, height, bytes_per_pixel, NULL)
+        result.owns_ptr = True
+        result.frame_type = frame_type
+        result.ptr.format = <lf.NativeFrameFormat>frame_format
+        result.ptr.timestamp = timestamp
+        result.ptr.sequence = sequence
+        result.ptr.exposure = exposure
+        result.ptr.gain = gain
+        result.ptr.gamma = gamma
+        result.ptr.status = status
+        return result
+
+    @staticmethod
+    def from_array(object array, int frame_type=-1, int frame_format=0,
+                   uint32_t timestamp=0, uint32_t sequence=0,
+                   float exposure=0.0, float gain=0.0, float gamma=0.0,
+                   uint32_t status=0):
+        cdef cnp.ndarray value = np.asarray(array)
+        if not value.flags.c_contiguous:
+            raise ValueError("frame arrays must be C-contiguous")
+        if value.dtype not in (np.dtype(np.uint8), np.dtype(np.float32)):
+            raise TypeError("frame arrays must use uint8 or float32")
+        if frame_format == <int>lf.FORMAT_RAW:
+            if value.dtype != np.uint8 or value.ndim != 1:
+                raise ValueError("raw frames require a one-dimensional uint8 array")
+        elif frame_format == <int>lf.FORMAT_FLOAT:
+            if value.dtype != np.float32 or value.ndim != 2:
+                raise ValueError("float frames require a two-dimensional float32 array")
+        elif frame_format == <int>lf.FORMAT_GRAY:
+            if value.dtype != np.uint8 or value.ndim != 2:
+                raise ValueError("gray frames require a two-dimensional uint8 array")
+        elif frame_format == <int>lf.FORMAT_BGRX or frame_format == <int>lf.FORMAT_RGBX:
+            if value.dtype != np.uint8 or value.ndim != 3 or value.shape[2] != 4:
+                raise ValueError("color frames require a (height, width, 4) uint8 array")
+        else:
+            raise ValueError("array-backed frames require a valid concrete format")
+        cdef size_t height
+        cdef size_t width
+        cdef size_t bpp
+        if value.ndim == 2:
+            height = value.shape[0]
+            width = value.shape[1]
+            bpp = value.dtype.itemsize
+        elif value.ndim == 3 and value.shape[2] == 4 and value.dtype == np.uint8:
+            height = value.shape[0]
+            width = value.shape[1]
+            bpp = 4
+        elif value.ndim == 1 and value.dtype == np.uint8:
+            height, width, bpp = 1, 1, value.size
+        else:
+            raise ValueError("expected a 1-D raw, 2-D scalar, or (H, W, 4) color array")
+        cdef NativeFrame result = NativeFrame()
+        result.ptr = new lf.NativeFrame(width, height, bpp, <unsigned char *>cnp.PyArray_DATA(value))
+        result.ptr.format = <lf.NativeFrameFormat>frame_format
+        result.owns_ptr = True
+        result.numpy_owner = value
+        result.frame_type = frame_type
+        result.ptr.timestamp = timestamp
+        result.ptr.sequence = sequence
+        result.ptr.exposure = exposure
+        result.ptr.gain = gain
+        result.ptr.gamma = gamma
+        result.ptr.status = status
+        return result
+
+    cdef void _check(self) except *:
+        if self.ptr == NULL:
+            raise DeviceStateError("frame is no longer valid")
+
+    @property
+    def width(self):
+        self._check()
+        return self.ptr.width
+
+    @property
+    def height(self):
+        self._check()
+        return self.ptr.height
+
+    @property
+    def bytes_per_pixel(self):
+        self._check()
+        return self.ptr.bytes_per_pixel
+
+    @property
+    def timestamp(self):
+        self._check()
+        return self.ptr.timestamp
+
+    @property
+    def sequence(self):
+        self._check()
+        return self.ptr.sequence
+
+    @property
+    def exposure(self):
+        self._check()
+        return self.ptr.exposure
+
+    @property
+    def gain(self):
+        self._check()
+        return self.ptr.gain
+
+    @property
+    def gamma(self):
+        self._check()
+        return self.ptr.gamma
+
+    @property
+    def status(self):
+        self._check()
+        return self.ptr.status
+
+    @property
+    def format(self):
+        self._check()
+        return <int>self.ptr.format
+
+    @property
+    def type(self):
+        return self.frame_type
+
+    def to_numpy(self, bint copy=False):
+        self._check()
+        cdef cnp.npy_intp shape[3]
+        cdef cnp.ndarray array
+        cdef int ndim
+        cdef int typenum
+        if self.ptr.format == lf.FORMAT_RAW:
+            ndim = 1
+            shape[0] = self.ptr.bytes_per_pixel
+            typenum = cnp.NPY_UINT8
+        elif self.ptr.format == lf.FORMAT_FLOAT:
+            ndim = 2
+            shape[0] = self.ptr.height
+            shape[1] = self.ptr.width
+            typenum = cnp.NPY_FLOAT32
+        elif self.ptr.format == lf.FORMAT_GRAY:
+            ndim = 2
+            shape[0] = self.ptr.height
+            shape[1] = self.ptr.width
+            typenum = cnp.NPY_UINT8
+        elif self.ptr.format == lf.FORMAT_BGRX or self.ptr.format == lf.FORMAT_RGBX:
+            ndim = 3
+            shape[0] = self.ptr.height
+            shape[1] = self.ptr.width
+            shape[2] = 4
+            typenum = cnp.NPY_UINT8
+        else:
+            raise ValueError(f"unsupported frame format: {<int>self.ptr.format}")
+        array = cnp.PyArray_SimpleNewFromData(ndim, shape, typenum, self.ptr.data)
+        Py_INCREF(self)
+        if cnp.PyArray_SetBaseObject(array, self) < 0:
+            raise MemoryError("failed to attach frame lifetime to NumPy array")
+        return array.copy() if copy else array
+
+
+cdef NativeFrame _borrow_frame(lf.NativeFrame *ptr, int frame_type, NativeFrameSet parent):
+    cdef NativeFrame result = NativeFrame()
+    result.ptr = ptr
+    result.frame_type = frame_type
+    result.parent = parent
+    parent.borrow_count += 1
+    return result
+
+
+cdef class NativeFrameSet:
+    cdef map[lf.NativeFrameType, lf.NativeFrame *] frames
+    cdef object listener
+    cdef int borrow_count
+    cdef bint filled
+    cdef bint release_requested
+    cdef bint released
+    cdef bint owns_frames
+
+    def __cinit__(self):
+        self.listener = None
+        self.borrow_count = 0
+        self.filled = False
+        self.release_requested = False
+        self.released = False
+        self.owns_frames = False
+
+    def __dealloc__(self):
+        if self.filled and not self.released:
+            if self.listener is not None:
+                (<NativeSyncFrameListener>self.listener)._release_native(self)
+            elif self.owns_frames:
+                self._release_owned()
+
+    cdef void _release_owned(self):
+        cdef map[lf.NativeFrameType, lf.NativeFrame *].iterator it = self.frames.begin()
+        cdef lf.NativeFrame *frame
+        while it != self.frames.end():
+            frame = deref(it).second
+            if frame != NULL:
+                del frame
+            inc(it)
+        self.frames.clear()
+        self.released = True
+
+    cdef void _drop_borrow(self):
+        if self.borrow_count > 0:
+            self.borrow_count -= 1
+        self._maybe_release()
+
+    cdef void _maybe_release(self):
+        if self.release_requested and self.borrow_count == 0 and not self.released:
+            if self.listener is not None:
+                (<NativeSyncFrameListener>self.listener)._release_native(self)
+            elif self.owns_frames:
+                self._release_owned()
+            else:
+                self.released = True
+
+    def get(self, int frame_type):
+        if self.release_requested:
+            raise DeviceStateError("frame set release has already been requested")
+        cdef lf.NativeFrameType key = _frame_type(frame_type)
+        cdef map[lf.NativeFrameType, lf.NativeFrame *].iterator it = self.frames.find(key)
+        if it == self.frames.end() or deref(it).second == NULL:
+            raise KeyError(frame_type)
+        return _borrow_frame(deref(it).second, frame_type, self)
+
+    def contains(self, int frame_type):
+        if self.release_requested:
+            return False
+        cdef lf.NativeFrameType key = _frame_type(frame_type)
+        cdef map[lf.NativeFrameType, lf.NativeFrame *].iterator it = self.frames.find(key)
+        return it != self.frames.end() and deref(it).second != NULL
+
+    def release(self):
+        if not self.release_requested:
+            self.release_requested = True
+        self._maybe_release()
+
+    @property
+    def is_released(self):
+        return self.release_requested != 0
+
+    @property
+    def release_complete(self):
+        return self.released != 0
+
+    @property
+    def entry_count(self):
+        return self.frames.size()
+
+
+def _testing_frame_set():
+    """Build a tiny owned native set for hardware-free lifetime tests."""
+    cdef NativeFrameSet result = NativeFrameSet()
+    cdef lf.NativeFrame *color = new lf.NativeFrame(2, 1, 4, NULL)
+    cdef lf.NativeFrame *depth = new lf.NativeFrame(2, 1, 4, NULL)
+    color.format = lf.FORMAT_BGRX
+    color.timestamp = 10
+    color.sequence = 1
+    depth.format = lf.FORMAT_FLOAT
+    depth.timestamp = 11
+    depth.sequence = 2
+    result.frames[lf.FRAME_COLOR] = color
+    result.frames[lf.FRAME_DEPTH] = depth
+    result.filled = True
+    result.owns_frames = True
+    return result
+
+
+cdef class NativeSyncFrameListener:
+    cdef lf.NativeSyncListener *ptr
+
+    def __cinit__(self, unsigned int frame_types):
+        self.ptr = new lf.NativeSyncListener(frame_types)
+
+    def __dealloc__(self):
+        if self.ptr != NULL:
+            del self.ptr
+            self.ptr = NULL
+
+    @property
+    def _listener_address(self):
+        return <size_t><lf.NativeFrameListener *>self.ptr
+
+    def has_new_frame(self):
+        return self.ptr.hasNewFrame() != 0
+
+    def wait(self, timeout=None):
+        cdef NativeFrameSet result = NativeFrameSet()
+        cdef bint ok = True
+        cdef int milliseconds
+        result.listener = self
+        if timeout is None:
+            with nogil:
+                self.ptr.waitForNewFrame(result.frames)
+        else:
+            if timeout < 0:
+                raise ValueError("timeout must be non-negative")
+            milliseconds = max(0, int(round(float(timeout) * 1000.0)))
+            with nogil:
+                ok = self.ptr.waitForNewFrame(result.frames, milliseconds)
+        if not ok:
+            raise FrameTimeoutError("timed out waiting for synchronized frames")
+        result.filled = True
+        return result
+
+    cdef void _release_native(self, NativeFrameSet frame_set):
+        if self.ptr != NULL and frame_set.filled and not frame_set.released:
+            with nogil:
+                self.ptr.release(frame_set.frames)
+            frame_set.released = True
+
+
+cdef class NativeDeviceHandle:
+    cdef lf.NativeDevice *ptr
+    cdef object owner
+    cdef object pipeline
+    cdef object color_listener
+    cdef object depth_listener
+    cdef bint running
+    cdef bint closed
+
+    def __cinit__(self):
+        self.ptr = NULL
+        self.owner = None
+        self.pipeline = None
+        self.color_listener = None
+        self.depth_listener = None
+        self.running = False
+        self.closed = False
+
+    def __dealloc__(self):
+        cdef bint ignored
+        if self.ptr != NULL and not self.closed:
+            if self.running:
+                with nogil:
+                    ignored = self.ptr.stop()
+            with nogil:
+                self.ptr.setColorFrameListener(NULL)
+                self.ptr.setIrAndDepthFrameListener(NULL)
+                ignored = self.ptr.close()
+        if self.pipeline is not None:
+            (<NativePipeline>self.pipeline)._device_closed()
+        self.ptr = NULL
+
+    cdef void _check(self) except *:
+        if self.ptr == NULL or self.closed:
+            raise DeviceStateError("device is closed")
+
+    cdef void _check_stopped(self) except *:
+        self._check()
+        if self.running:
+            raise DeviceStateError("device configuration cannot change while streaming")
+
+    @property
+    def serial_number(self):
+        self._check()
+        return _text(self.ptr.getSerialNumber())
+
+    @property
+    def firmware_version(self):
+        self._check()
+        return _text(self.ptr.getFirmwareVersion())
+
+    @property
+    def pipeline_name(self):
+        self._check()
+        return _text(self.ptr.getPacketPipelineName())
+
+    def color_camera_params(self):
+        self._check()
+        cdef lf.NativeDevice.ColorCameraParams p = self.ptr.getColorCameraParams()
+        return {
+            "fx": p.fx, "fy": p.fy, "cx": p.cx, "cy": p.cy,
+            "shift_d": p.shift_d, "shift_m": p.shift_m,
+            "mx_x3y0": p.mx_x3y0, "mx_x0y3": p.mx_x0y3,
+            "mx_x2y1": p.mx_x2y1, "mx_x1y2": p.mx_x1y2,
+            "mx_x2y0": p.mx_x2y0, "mx_x0y2": p.mx_x0y2,
+            "mx_x1y1": p.mx_x1y1, "mx_x1y0": p.mx_x1y0,
+            "mx_x0y1": p.mx_x0y1, "mx_x0y0": p.mx_x0y0,
+            "my_x3y0": p.my_x3y0, "my_x0y3": p.my_x0y3,
+            "my_x2y1": p.my_x2y1, "my_x1y2": p.my_x1y2,
+            "my_x2y0": p.my_x2y0, "my_x0y2": p.my_x0y2,
+            "my_x1y1": p.my_x1y1, "my_x1y0": p.my_x1y0,
+            "my_x0y1": p.my_x0y1, "my_x0y0": p.my_x0y0,
+        }
+
+    def ir_camera_params(self):
+        self._check()
+        cdef lf.NativeDevice.IrCameraParams p = self.ptr.getIrCameraParams()
+        return {
+            "fx": p.fx, "fy": p.fy, "cx": p.cx, "cy": p.cy,
+            "k1": p.k1, "k2": p.k2, "k3": p.k3,
+            "p1": p.p1, "p2": p.p2,
+        }
+
+    def set_color_camera_params(self, params):
+        self._check_stopped()
+        cdef lf.NativeDevice.ColorCameraParams value
+        _fill_color(&value, params)
+        with nogil:
+            self.ptr.setColorCameraParams(value)
+
+    def set_ir_camera_params(self, params):
+        self._check_stopped()
+        cdef lf.NativeDevice.IrCameraParams value
+        _fill_ir(&value, params)
+        with nogil:
+            self.ptr.setIrCameraParams(value)
+
+    def set_configuration(self, config):
+        self._check_stopped()
+        cdef lf.NativeDevice.Config value = lf.NativeDevice.Config()
+        value.MinDepth = config.min_depth
+        value.MaxDepth = config.max_depth
+        value.EnableBilateralFilter = config.enable_bilateral_filter
+        value.EnableEdgeAwareFilter = config.enable_edge_aware_filter
+        with nogil:
+            self.ptr.setConfiguration(value)
+
+    def set_color_listener(self, NativeSyncFrameListener listener not None):
+        self._check_stopped()
+        with nogil:
+            self.ptr.setColorFrameListener(<lf.NativeFrameListener *>listener.ptr)
+        self.color_listener = listener
+
+    def set_depth_listener(self, NativeSyncFrameListener listener not None):
+        self._check_stopped()
+        with nogil:
+            self.ptr.setIrAndDepthFrameListener(<lf.NativeFrameListener *>listener.ptr)
+        self.depth_listener = listener
+
+    def set_color_auto_exposure(self, float compensation=0.0):
+        self._check_stopped()
+        if compensation < -2.0 or compensation > 2.0:
+            raise ValueError("exposure compensation must be in [-2, 2]")
+        with nogil:
+            self.ptr.setColorAutoExposure(compensation)
+
+    def set_color_semi_auto_exposure(self, float exposure_time_ms):
+        self._check_stopped()
+        if exposure_time_ms <= 0:
+            raise ValueError("exposure time must be positive")
+        with nogil:
+            self.ptr.setColorSemiAutoExposure(exposure_time_ms)
+
+    def set_color_manual_exposure(self, float integration_time_ms, float analog_gain):
+        self._check_stopped()
+        if integration_time_ms <= 0 or integration_time_ms > 66:
+            raise ValueError("integration_time_ms must be in (0, 66]")
+        if analog_gain < 1 or analog_gain > 4:
+            raise ValueError("analog_gain must be in [1, 4]")
+        with nogil:
+            self.ptr.setColorManualExposure(integration_time_ms, analog_gain)
+
+    def set_color_setting(self, int command, value):
+        self._check_stopped()
+        cdef lf.NativeColorSetting native_command = <lf.NativeColorSetting>command
+        cdef float float_value
+        cdef uint32_t int_value
+        if isinstance(value, float):
+            float_value = value
+            with nogil:
+                self.ptr.setColorSetting(native_command, float_value)
+        else:
+            int_value = value
+            with nogil:
+                self.ptr.setColorSetting(native_command, int_value)
+
+    def get_color_setting(self, int command, bint as_float=False):
+        self._check_stopped()
+        cdef lf.NativeColorSetting native_command = <lf.NativeColorSetting>command
+        cdef float float_value
+        cdef uint32_t int_value
+        if as_float:
+            with nogil:
+                float_value = self.ptr.getColorSettingFloat(native_command)
+            return float_value
+        with nogil:
+            int_value = self.ptr.getColorSetting(native_command)
+        return int_value
+
+    def set_led_status(self, settings):
+        self._check_stopped()
+        cdef lf.NativeLedSettings value
+        value.LedId = settings.led_id
+        value.Mode = settings.mode
+        value.StartLevel = settings.start_level
+        value.StopLevel = settings.stop_level
+        value.IntervalInMs = settings.interval_ms
+        value.Reserved = settings.reserved
+        with nogil:
+            self.ptr.setLedStatus(value)
+
+    def start(self, rgb=True, depth=True):
+        self._check()
+        if self.running:
+            raise DeviceStateError("device is already streaming")
+        cdef bint ok
+        cdef bint enable_rgb = rgb
+        cdef bint enable_depth = depth
+        if not enable_rgb and not enable_depth:
+            raise ValueError("at least one stream must be enabled")
+        if enable_rgb and self.color_listener is None:
+            raise DeviceStateError("a color listener must be attached before starting RGB")
+        if enable_depth and self.depth_listener is None:
+            raise DeviceStateError("a depth listener must be attached before starting IR/depth")
+        with nogil:
+            ok = self.ptr.startStreams(enable_rgb, enable_depth)
+        if not ok:
+            raise DeviceStateError("device failed to start the requested streams")
+        self.running = True
+
+    def stop(self):
+        if self.ptr == NULL or self.closed:
+            return
+        cdef bint ok = True
+        if self.running:
+            with nogil:
+                ok = self.ptr.stop()
+        self.running = False
+        if not ok:
+            raise DeviceStateError("device failed to stop")
+
+    def close(self):
+        if self.closed or self.ptr == NULL:
+            return
+        cdef bint stop_ok = True
+        cdef bint close_ok
+        if self.running:
+            with nogil:
+                stop_ok = self.ptr.stop()
+        self.running = False
+        with nogil:
+            self.ptr.setColorFrameListener(NULL)
+            self.ptr.setIrAndDepthFrameListener(NULL)
+            close_ok = self.ptr.close()
+        self.color_listener = None
+        self.depth_listener = None
+        self.closed = True
+        if self.pipeline is not None:
+            (<NativePipeline>self.pipeline)._device_closed()
+            self.pipeline = None
+        if not stop_ok:
+            raise DeviceStateError("device failed to stop while closing")
+        if not close_ok:
+            raise DeviceStateError("device failed to close")
+
+    @property
+    def is_running(self):
+        return self.running != 0
+
+    @property
+    def is_closed(self):
+        return self.closed != 0
+
+
+cdef NativeDeviceHandle _wrap_device(lf.NativeDevice *ptr, object owner, NativePipeline pipeline):
+    if ptr == NULL:
+        if pipeline is not None:
+            pipeline._open_failed()
+        raise DeviceOpenError("libfreenect2 returned no device")
+    cdef NativeDeviceHandle result = NativeDeviceHandle()
+    result.ptr = ptr
+    result.owner = owner
+    result.pipeline = pipeline
+    if pipeline is not None:
+        pipeline._attach()
+    return result
+
+
+cdef class NativeFreenect2Context:
+    cdef lf.NativeFreenect2 *ptr
+
+    def __cinit__(self):
+        self.ptr = new lf.NativeFreenect2()
+
+    def __dealloc__(self):
+        if self.ptr != NULL:
+            del self.ptr
+            self.ptr = NULL
+
+    def enumerate_devices(self):
+        cdef int count
+        with nogil:
+            count = self.ptr.enumerateDevices()
+        return count
+
+    def device_serial_number(self, int index):
+        return _text(self.ptr.getDeviceSerialNumber(index))
+
+    def default_device_serial_number(self):
+        return _text(self.ptr.getDefaultDeviceSerialNumber())
+
+    def open_device(self, name=None, NativePipeline pipeline=None):
+        cdef lf.NativeDevice *device = NULL
+        cdef lf.NativePacketPipeline *native_pipeline = NULL
+        cdef string serial
+        cdef int index
+        if pipeline is not None:
+            native_pipeline = pipeline._consume()
+        if name is None:
+            with nogil:
+                if native_pipeline == NULL:
+                    device = self.ptr.openDefaultDevice()
+                else:
+                    device = self.ptr.openDefaultDevice(native_pipeline)
+        elif isinstance(name, int):
+            index = name
+            with nogil:
+                if native_pipeline == NULL:
+                    device = self.ptr.openDevice(index)
+                else:
+                    device = self.ptr.openDevice(index, native_pipeline)
+        else:
+            serial = str(name).encode("utf-8")
+            with nogil:
+                if native_pipeline == NULL:
+                    device = self.ptr.openDevice(serial)
+                else:
+                    device = self.ptr.openDevice(serial, native_pipeline)
+        return _wrap_device(device, self, pipeline)
+
+
+cdef class NativeReplayContext:
+    cdef lf.NativeReplay *ptr
+
+    def __cinit__(self):
+        self.ptr = new lf.NativeReplay()
+
+    def __dealloc__(self):
+        if self.ptr != NULL:
+            del self.ptr
+            self.ptr = NULL
+
+    def open_device(self, filenames, calibration=None, NativePipeline pipeline=None):
+        cdef vector[string] paths
+        cdef object filename
+        for filename in filenames:
+            paths.push_back(str(filename).encode("utf-8"))
+        if paths.empty():
+            raise DeviceOpenError("replay requires at least one frame filename")
+
+        cdef lf.NativePacketPipeline *native_pipeline = NULL
+        if pipeline is not None:
+            native_pipeline = pipeline._consume()
+        cdef lf.NativeDevice *device = NULL
+        cdef lf.ReplayCalibration native_calibration
+        cdef cnp.ndarray p0
+        cdef cnp.ndarray x_table
+        cdef cnp.ndarray z_table
+        cdef cnp.ndarray lookup_table
+        if calibration is None:
+            with nogil:
+                if native_pipeline == NULL:
+                    device = self.ptr.openDevice(paths)
+                else:
+                    device = self.ptr.openDevice(paths, native_pipeline)
+        else:
+            _fill_color(&native_calibration.color, calibration.color)
+            _fill_ir(&native_calibration.ir, calibration.ir)
+            p0 = np.ascontiguousarray(calibration.p0_tables, dtype=np.uint8)
+            x_table = np.ascontiguousarray(calibration.x_table, dtype=np.float32)
+            z_table = np.ascontiguousarray(calibration.z_table, dtype=np.float32)
+            lookup_table = np.ascontiguousarray(calibration.lookup_table, dtype=np.int16)
+            native_calibration.p0_tables.resize(p0.size)
+            native_calibration.x_table.resize(x_table.size)
+            native_calibration.z_table.resize(z_table.size)
+            native_calibration.lookup_table.resize(lookup_table.size)
+            if p0.size:
+                memcpy(&native_calibration.p0_tables[0], cnp.PyArray_DATA(p0), p0.nbytes)
+            if x_table.size:
+                memcpy(&native_calibration.x_table[0], cnp.PyArray_DATA(x_table), x_table.nbytes)
+            if z_table.size:
+                memcpy(&native_calibration.z_table[0], cnp.PyArray_DATA(z_table), z_table.nbytes)
+            if lookup_table.size:
+                memcpy(&native_calibration.lookup_table[0], cnp.PyArray_DATA(lookup_table), lookup_table.nbytes)
+            with nogil:
+                if native_pipeline == NULL:
+                    device = self.ptr.openDevice(paths, native_calibration)
+                else:
+                    device = self.ptr.openDevice(paths, native_calibration, native_pipeline)
+        return _wrap_device(device, self, pipeline)
+
+
+cdef class NativeRegistrationHandle:
+    cdef lf.NativeRegistration *ptr
+
+    def __cinit__(self, ir_params, color_params):
+        cdef lf.NativeDevice.IrCameraParams ir
+        cdef lf.NativeDevice.ColorCameraParams color
+        _fill_ir(&ir, ir_params)
+        _fill_color(&color, color_params)
+        self.ptr = new lf.NativeRegistration(ir, color)
+
+    def __dealloc__(self):
+        if self.ptr != NULL:
+            del self.ptr
+            self.ptr = NULL
+
+    def apply_point(self, int dx, int dy, float dz):
+        cdef float cx = 0
+        cdef float cy = 0
+        with nogil:
+            self.ptr.apply(dx, dy, dz, cx, cy)
+        return cx, cy
+
+    def apply(self, NativeFrame rgb, NativeFrame depth, NativeFrame undistorted,
+              NativeFrame registered, bint enable_filter=True,
+              NativeFrame bigdepth=None, object color_depth_map=None):
+        cdef lf.NativeFrame *big = NULL
+        if bigdepth is not None:
+            big = bigdepth.ptr
+        cdef cnp.ndarray mapping
+        cdef int *mapping_ptr = NULL
+        if color_depth_map is not None:
+            mapping = np.asarray(color_depth_map)
+            if (mapping.dtype != np.dtype(np.int32) or
+                    not mapping.flags.c_contiguous or mapping.size != 512 * 424):
+                raise ValueError("color_depth_map must be a contiguous int32 array with 512*424 entries")
+            mapping_ptr = <int *>cnp.PyArray_DATA(mapping)
+        with nogil:
+            self.ptr.apply(rgb.ptr, depth.ptr, undistorted.ptr, registered.ptr,
+                           enable_filter, big, mapping_ptr)
+
+    def undistort_depth(self, NativeFrame depth, NativeFrame undistorted):
+        with nogil:
+            self.ptr.undistortDepth(depth.ptr, undistorted.ptr)
+
+    def point_xyz(self, NativeFrame undistorted, int row, int column):
+        cdef float x = 0
+        cdef float y = 0
+        cdef float z = 0
+        with nogil:
+            self.ptr.getPointXYZ(undistorted.ptr, row, column, x, y, z)
+        return x, y, z
+
+    def point_xyz_rgb(self, NativeFrame undistorted, NativeFrame registered, int row, int column):
+        cdef float x = 0
+        cdef float y = 0
+        cdef float z = 0
+        cdef float rgb = 0
+        with nogil:
+            self.ptr.getPointXYZRGB(undistorted.ptr, registered.ptr, row, column, x, y, z, rgb)
+        cdef unsigned char *channels = <unsigned char *>&rgb
+        return x, y, z, channels[0], channels[1], channels[2]
+
+
+def default_logger_level():
+    return <int>lf.loggerDefaultLevel()
+
+
+def logger_level_name(int level):
+    return _text(lf.loggerLevelToString(<lf.NativeLoggerLevel>level))
+
+
+def global_logger_level():
+    cdef lf.NativeLogger *logger = lf.getGlobalLogger()
+    if logger == NULL:
+        return None
+    return <int>logger.level()
+
+
+def set_global_log_level(level=None):
+    cdef lf.NativeLogger *logger = NULL
+    if level is not None:
+        logger = lf.createConsoleLogger(<lf.NativeLoggerLevel><int>level)
+    lf.setGlobalLogger(logger)

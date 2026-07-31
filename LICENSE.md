@@ -1,4 +1,4 @@
-The pylibfreenect2 package is licensed under the MIT "Expat" License:
+The pylibfreenect3 package is licensed under the MIT "Expat" License:
 
 > Copyright (c) 2015: Ryuichi Yamamoto.
 >

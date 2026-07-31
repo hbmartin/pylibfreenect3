@@ -1,0 +1,216 @@
+name: 0.3 release artifacts
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: libfreenect2-metal ref (release builds must use v0.3.0)
+        required: false
+        default: main
+  push:
+    tags:
+      - v0.3.0
+
+permissions:
+  contents: read
+
+env:
+  CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.3.0' || 'main') }}
+
+jobs:
+  wheels:
+    name: ${{ matrix.name }} wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            artifact: wheels-macos-arm64
+          - name: manylinux_2_28 x86_64
+            os: ubuntu-24.04
+            artifact: wheels-manylinux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - name: Verify coordinated release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "$(git -C vendor/libfreenect2-metal describe --tags --exact-match)" = v0.3.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install pinned wheel tooling
+        run: python -m pip install cibuildwheel==4.1.1 ${{ runner.os == 'macOS' && 'delocate==0.13.0' || 'auditwheel==6.7.0' }}
+      - name: Build and repair wheels
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          PYLIBF3_REQUIRE_CORE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+      - name: Inspect repaired dependency closure
+        run: python tools/verify_wheel.py wheelhouse/*.whl
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Build pinned native inputs
+        run: bash tools/build_wheel_dependencies.sh vendor/libfreenect2-metal
+        env:
+          PYLIBF3_REQUIRE_CORE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}
+      - name: Build source distribution
+        run: |
+          python -m pip install build==1.3.0
+          LIBFREENECT2_INSTALL_PREFIX=/tmp/pylibfreenect3-wheel-prefix python -m build --sdist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          repository: hbmartin/libfreenect2-metal
+          ref: ${{ env.CORE_REF }}
+          path: vendor/libfreenect2-metal
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libusb-1.0-0-dev libturbojpeg0-dev ninja-build
+      - name: Build sanitized core
+        run: |
+          cmake -S vendor/libfreenect2-metal -B "$RUNNER_TEMP/core-sanitized" -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_OPENNI2_DRIVER=OFF \
+            -DBUILD_STREAMER_RECORDER=OFF \
+            -DBUILD_MEDIAPIPE_DEMO=OFF \
+            -DBUILD_TESTING=ON \
+            -DENABLE_ASAN=ON \
+            -DENABLE_UBSAN=ON \
+            -DENABLE_CUDA=OFF \
+            -DENABLE_METAL=OFF \
+            -DENABLE_OPENCL=OFF \
+            -DENABLE_OPENGL=OFF
+          cmake --build "$RUNNER_TEMP/core-sanitized" --parallel 2
+          cmake --install "$RUNNER_TEMP/core-sanitized"
+      - name: Run core unit tests under ASan and UBSan
+        run: ctest --test-dir "$RUNNER_TEMP/core-sanitized" -L unit --output-on-failure --timeout 180
+      - name: Build sanitized binding and run ownership/replay tests
+        run: |
+          python -m pip install 'Cython>=3.2.8' 'numpy>=2.2' 'pytest>=8' setuptools wheel
+          sanitizer_flags='-fsanitize=address,undefined -fno-omit-frame-pointer'
+          asan_runtime=$(cc -print-file-name=libasan.so)
+          CPPFLAGS="$sanitizer_flags" CFLAGS="$sanitizer_flags" \
+            CXXFLAGS="$sanitizer_flags" LDFLAGS="$sanitizer_flags" \
+            LIBFREENECT2_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            LD_LIBRARY_PATH="$RUNNER_TEMP/core-prefix/lib" \
+            python -m pip install --no-build-isolation --editable .
+          LIBFREENECT2_INSTALL_PREFIX="$RUNNER_TEMP/core-prefix" \
+            LD_LIBRARY_PATH="$RUNNER_TEMP/core-prefix/lib" \
+            LD_PRELOAD="$asan_runtime" \
+            python -m pytest tests/test_api.py tests/test_recording.py -q
+
+  docs:
+    needs: wheels
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheels-manylinux-x86_64
+          path: wheelhouse
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Build documentation against the repaired wheel
+        run: |
+          python -m pip install wheelhouse/*cp314*.whl 'sphinx>=8' 'sphinx-rtd-theme>=3'
+          sphinx-build -W --keep-going docs docs/_build/html
+
+  hardware:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: wheels
+    runs-on: [self-hosted, macOS, ARM64, kinect-v2]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheels-macos-arm64
+          path: wheelhouse
+      - uses: astral-sh/setup-uv@v7
+      - name: Test every macOS wheel on a Kinect v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          for wheel in wheelhouse/*.whl; do
+            tag=$(basename "$wheel" | sed -E 's/.*-(cp3[0-9]+)-.*/\1/')
+            version="${tag:2:1}.${tag:3}"
+            environment="$RUNNER_TEMP/pylibfreenect3-$tag"
+            uv venv --python "$version" "$environment"
+            env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
+              uv pip install --python "$environment/bin/python" "$wheel" pytest
+            env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
+              "$environment/bin/python" -m pytest tests/test_hardware.py -m hardware -q
+          done
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [wheels, sdist, sanitizers, docs, hardware]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
