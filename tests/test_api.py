@@ -99,6 +99,16 @@ def test_removed_top_level_symbols_have_actionable_errors(
     assert symbol not in dir(f3)
 
 
+def test_dir_lists_real_module_attributes() -> None:
+    listed = dir(f3)
+    assert set(f3.__all__) <= set(listed)
+    assert "__version__" in listed
+    assert "NoReturn" not in listed
+    assert "version" not in listed
+    assert "PackageNotFoundError" not in listed
+    assert "_MOVED_SYMBOLS" not in listed
+
+
 def test_backend_classes_are_importable_and_report_availability() -> None:
     classes = {
         "cpu": f3.lowlevel.CpuPacketPipeline,

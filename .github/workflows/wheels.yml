@@ -292,6 +292,10 @@ jobs:
           set -euo pipefail
           for wheel in wheelhouse/*.whl; do
             tag=$(basename "$wheel" | sed -E 's/.*-(cp3[0-9]+)-.*/\1/')
+            if [[ ! "$tag" =~ ^cp3[0-9]+$ ]]; then
+              echo "unrecognized wheel tag in $wheel" >&2
+              exit 1
+            fi
             version="${tag:2:1}.${tag:3}"
             env -u DYLD_LIBRARY_PATH -u LD_LIBRARY_PATH -u LIBFREENECT2_PIPELINE \
               uv run --isolated --no-project --python "$version" \

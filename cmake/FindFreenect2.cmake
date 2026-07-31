@@ -20,6 +20,10 @@ if(TARGET freenect2::freenect2)
       _Freenect2_configurations freenect2::freenect2 IMPORTED_CONFIGURATIONS
     )
     if(_Freenect2_configurations)
+      # Multi-config packages may list DEBUG first; the probe and RPATH
+      # should resolve to the release library whenever one is available.
+      list(REMOVE_ITEM _Freenect2_configurations RELEASE)
+      list(PREPEND _Freenect2_configurations RELEASE)
       foreach(_Freenect2_configuration IN LISTS _Freenect2_configurations)
         get_target_property(
           Freenect2_LIBRARY freenect2::freenect2
