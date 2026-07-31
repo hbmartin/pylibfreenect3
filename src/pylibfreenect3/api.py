@@ -397,7 +397,12 @@ class FrameSet(Mapping[FrameType, Frame]):
     def __getitem__(self, key: FrameType) -> Frame:
         if self._released:
             raise DeviceStateError("frame set has already been released")
-        frame_type = FrameType(key)
+        # Invalid keys (including the removed 0.3 string keys) must raise
+        # KeyError so the Mapping mixins, e.g. get(), handle them.
+        try:
+            frame_type = FrameType(key)
+        except (TypeError, ValueError) as error:
+            raise KeyError(key) from error
         if frame_type not in tuple(FrameType):
             raise KeyError(key)
         if self._native is not None:

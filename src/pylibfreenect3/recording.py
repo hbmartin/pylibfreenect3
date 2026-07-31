@@ -549,7 +549,7 @@ class RecordingBundle:
             raise RecordingFormatError("requested replay streams were not recorded")
         file_streams: set[str] = set()
         if Stream.COLOR in selected:
-            file_streams.add(Stream.COLOR)
+            file_streams.add("color")
         if selected & {Stream.IR, Stream.DEPTH}:
             file_streams.add("depth")
         recorded_file_streams = set()

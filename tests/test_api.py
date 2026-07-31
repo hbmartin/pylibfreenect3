@@ -374,6 +374,9 @@ def test_frame_set_mapping_and_unknown_keys_are_missing() -> None:
         _ = frames[f3.FrameType.COLOR | f3.FrameType.DEPTH]
     with pytest.raises(KeyError):
         _ = frames[8]
+    with pytest.raises(KeyError):
+        _ = frames["color"]
+    assert frames.get("color") is None
     frames.release()
 
 

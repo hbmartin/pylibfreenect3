@@ -77,8 +77,6 @@ sdist.exclude = [
   ".github/**",
   "build/**",
   "dist/**",
-  "reviews_triage/**",
-  "triage_decisions.db",
   "src/pylibfreenect3/_native.cpp",
   "src/pylibfreenect3/_native.*.so",
   "tests/.DS_Store",
@@ -89,13 +87,13 @@ sdist.exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["hardware: requires a Kinect v2 device"]
+# Coverage is enforced only by the CI quality gate, which passes the
+# --cov flags explicitly; baking them into addopts would fail every job
+# that runs a subset of the suite (prerelease, sanitizers, hardware).
 addopts = [
   "-ra",
   "--strict-config",
   "--strict-markers",
-  "--cov=pylibfreenect3",
-  "--cov-report=term-missing",
-  "--cov-fail-under=80",
 ]
 
 [tool.coverage.run]
@@ -132,7 +130,7 @@ exclude = ["src/pylibfreenect3/_native.pyx", "src/pylibfreenect3/libfreenect2.px
 build = ["cp312-*", "cp313-*", "cp314-*"]
 skip = ["*-win32", "*-win_amd64", "*-musllinux_*", "cp*t-*"]
 build-frontend = "build[uv]"
-test-command = "uv run --isolated --no-project --with {wheel} --with pytest --with pytest-cov pytest {project}/tests -m 'not hardware'"
+test-command = "uv run --isolated --no-project --with {wheel} --with pytest pytest {project}/tests -m 'not hardware'"
 before-all = "bash {project}/tools/build_wheel_dependencies.sh {project}/vendor/libfreenect2-metal"
 environment = {Freenect2_ROOT = "/tmp/pylibfreenect3-wheel-prefix", PYLIBF3_WHEEL_PREFIX = "/tmp/pylibfreenect3-wheel-prefix", MACOSX_DEPLOYMENT_TARGET = "11.0"}
 

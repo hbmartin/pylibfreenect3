@@ -777,10 +777,10 @@ cdef class NativeDeviceHandle:
             float_value = float(value)
             with nogil:
                 self.ptr.setColorSetting(native_command, float_value)
-        # `bool` here is libcpp.bool, so Python bools are excluded by
-        # identity against True/False instead of isinstance.
-        elif (isinstance(value, (int, np.integer)) and value is not True and
-              value is not False and not isinstance(value, np.bool_)):
+        # Booleans are integers in Python, but they are not valid color
+        # setting values, so reject them explicitly.
+        elif (isinstance(value, (int, np.integer)) and
+              not isinstance(value, (bool, np.bool_))):
             if not 0 <= int(value) <= 0xFFFFFFFF:
                 raise ValueError("integer color settings must fit in uint32")
             int_value = int(value)

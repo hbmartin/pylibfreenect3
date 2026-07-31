@@ -10,8 +10,38 @@ find_package(freenect2 CONFIG QUIET)
 
 if(TARGET freenect2::freenect2)
   set(Freenect2_DISCOVERY "CMake package")
-  get_target_property(Freenect2_INCLUDE_DIR freenect2::freenect2 INTERFACE_INCLUDE_DIRECTORIES)
+  # Exported packages may publish only configuration-qualified locations
+  # (IMPORTED_LOCATION_RELEASE and friends) and a list of interface include
+  # directories; resolve both to single values for the version check, the
+  # runtime probe, and the RPATH layout.
   get_target_property(Freenect2_LIBRARY freenect2::freenect2 IMPORTED_LOCATION)
+  if(NOT Freenect2_LIBRARY)
+    get_target_property(
+      _Freenect2_configurations freenect2::freenect2 IMPORTED_CONFIGURATIONS
+    )
+    if(_Freenect2_configurations)
+      foreach(_Freenect2_configuration IN LISTS _Freenect2_configurations)
+        get_target_property(
+          Freenect2_LIBRARY freenect2::freenect2
+          "IMPORTED_LOCATION_${_Freenect2_configuration}"
+        )
+        if(Freenect2_LIBRARY)
+          break()
+        endif()
+      endforeach()
+    endif()
+  endif()
+  get_target_property(
+    _Freenect2_interface_includes freenect2::freenect2 INTERFACE_INCLUDE_DIRECTORIES
+  )
+  if(_Freenect2_interface_includes)
+    foreach(_Freenect2_include IN LISTS _Freenect2_interface_includes)
+      if(EXISTS "${_Freenect2_include}/libfreenect2/config.h")
+        set(Freenect2_INCLUDE_DIR "${_Freenect2_include}")
+        break()
+      endif()
+    endforeach()
+  endif()
   add_library(Freenect2::Freenect2 INTERFACE IMPORTED)
   set_property(TARGET Freenect2::Freenect2 PROPERTY INTERFACE_LINK_LIBRARIES freenect2::freenect2)
 else()
@@ -87,6 +117,8 @@ int main() {
   return 0;
 }
 ]=])
+  # try_run executes a host binary, so this find module does not support
+  # cross-compilation; every supported build environment compiles natively.
   try_run(
     Freenect2_PROBE_RUN Freenect2_PROBE_COMPILE
     SOURCES "${_Freenect2_probe}"
