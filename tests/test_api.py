@@ -506,14 +506,14 @@ def test_registration_overloads_with_synthetic_frames() -> None:
         color,
         depth,
         include_big_depth=True,
-        include_color_depth_map=True,
+        include_depth_to_color_map=True,
     )
     assert result.undistorted.to_numpy().shape == (424, 512)
     assert result.registered.to_numpy().shape == (424, 512, 4)
     assert result.big_depth is not None
     assert result.big_depth.to_numpy().shape == (1082, 1920)
-    assert result.color_depth_map is not None
-    assert result.color_depth_map.shape == (424, 512)
+    assert result.depth_to_color_map is not None
+    assert result.depth_to_color_map.shape == (424, 512)
     assert np.isfinite(registration.point_xyz(result.undistorted, 212, 256)).all()
     registered_data = np.zeros((424, 512, 4), np.uint8)
     registered_data[212, 256, :3] = (1, 2, 3)
@@ -544,3 +544,186 @@ def test_native_registration_rejects_none_frames() -> None:
         native.point_xyz(None, 0, 0)
     with pytest.raises(TypeError):
         native.point_xyz_rgb(None, None, 0, 0)
+
+
+def test_arrival_timestamp_color_conversion_and_detached_copy() -> None:
+    bgrx = np.array([[[30, 20, 10, 0], [60, 50, 40, 0]]], dtype=np.uint8)
+    frame = f3.Frame.from_array(
+        bgrx,
+        frame_format=f3.FrameFormat.BGRX,
+        arrival_timestamp_us=123_456,
+    )
+    destination = np.empty((1, 2, 3), dtype=np.uint8)
+    assert frame.to_color(out=destination) is destination
+    assert destination.tolist() == [[[30, 20, 10], [60, 50, 40]]]
+    assert frame.to_color(f3.ColorOrder.RGB).tolist() == [[[10, 20, 30], [40, 50, 60]]]
+    assert frame.arrival_timestamp_us == 123_456
+
+    with pytest.raises(TypeError, match="dtype uint8"):
+        frame.to_color(out=np.empty((1, 2, 3), dtype=np.float32))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="shape"):
+        frame.to_color(out=np.empty((1, 1, 3), dtype=np.uint8))
+    noncontiguous = np.empty((1, 2, 6), dtype=np.uint8)[:, :, ::2]
+    with pytest.raises(ValueError, match="C-contiguous"):
+        frame.to_color(out=noncontiguous)
+    readonly = np.empty((1, 2, 3), dtype=np.uint8)
+    readonly.flags.writeable = False
+    with pytest.raises(ValueError, match="writable"):
+        frame.to_color(out=readonly)
+
+    frames = f3.FrameSet(_native._testing_frame_set())
+    copied = frames.detached_copy()
+    assert copied.color.arrival_timestamp_us == 1000
+    assert copied.depth.arrival_timestamp_us == 1100
+
+
+def test_timestamp_aligned_listener_wraparound_and_stats() -> None:
+    listener = f3.lowlevel.AlignedFrameListener(
+        f3.FrameType.COLOR | f3.FrameType.DEPTH,
+        f3.AlignmentConfig(max_delta=0.001, queue_capacity=8),
+    )
+    color = f3.Frame.allocate(
+        1,
+        1,
+        4,
+        frame_type=f3.FrameType.COLOR,
+        frame_format=f3.FrameFormat.BGRX,
+        timestamp=2,
+        arrival_timestamp_us=10,
+    )
+    depth = f3.Frame.allocate(
+        1,
+        1,
+        4,
+        frame_type=f3.FrameType.DEPTH,
+        frame_format=f3.FrameFormat.FLOAT,
+        timestamp=2**32 - 2,
+        arrival_timestamp_us=11,
+    )
+    assert listener._native._testing_push(int(f3.FrameType.COLOR), color._native)
+    assert listener._native._testing_push(int(f3.FrameType.DEPTH), depth._native)
+    with listener.wait(0) as frames:
+        assert frames.alignment_delta_ticks == 4
+        assert frames.alignment_delta_seconds == 0.0005
+    assert listener.alignment_stats == f3.AlignmentStats(1, 0, 4, 4)
+
+
+def test_registration_workspace_maps_batch_and_lifting() -> None:
+    ir = f3.IrCameraParams(fx=365.0, fy=365.0, cx=256.0, cy=212.0)
+    color_params = f3.ColorCameraParams(
+        fx=1081.0,
+        fy=1081.0,
+        cx=959.5,
+        cy=539.5,
+        shift_d=863.0,
+        shift_m=52.0,
+        mx_x1y0=1.0,
+        my_x0y1=1.0,
+    )
+    registration = f3.Registration(ir, color_params)
+    workspace = registration.workspace(
+        include_big_depth=True,
+        include_depth_to_color_map=True,
+        include_color_to_depth_map=True,
+    )
+    with pytest.raises(f3.DeviceStateError, match="has not been applied"):
+        workspace.lift_normalized([[0.5, 0.5]])
+
+    color = f3.Frame.from_array(
+        np.zeros((1080, 1920, 4), dtype=np.uint8),
+        frame_format=f3.FrameFormat.RGBX,
+    )
+    depth = f3.Frame.from_array(
+        np.full((424, 512), 1000.0, dtype=np.float32),
+        frame_format=f3.FrameFormat.FLOAT,
+    )
+    first = workspace.apply(color, depth)
+    identities = tuple(
+        id(value)
+        for value in (
+            first,
+            first.undistorted,
+            first.registered,
+            first.big_depth,
+            first.depth_to_color_map,
+            first.color_to_depth_map,
+        )
+    )
+    second = workspace.apply(color, depth, enable_filter=False)
+    assert identities == tuple(
+        id(value)
+        for value in (
+            second,
+            second.undistorted,
+            second.registered,
+            second.big_depth,
+            second.depth_to_color_map,
+            second.color_to_depth_map,
+        )
+    )
+    assert second.registered.format is f3.FrameFormat.RGBX
+    assert second.color_to_depth_map is not None
+    assert second.color_to_depth_map.shape == (1080, 1920)
+
+    center_index = 212 * 512 + 256
+    workspace.undistorted.to_numpy().fill(0)
+    workspace.undistorted.to_numpy()[212, 256] = 1000.0
+    workspace.color_to_depth_map.fill(-1)
+    workspace.color_to_depth_map[540, 960] = center_index
+    lifted = workspace.lift_normalized(np.array([[0.5, 0.5], [-0.1, 0.5]]))
+    assert lifted.xyz.shape == (2, 3)
+    assert lifted.valid.tolist() == [True, False]
+    assert lifted.depth_pixels.tolist() == [[212, 256], [-1, -1]]
+    assert np.isfinite(lifted.xyz[0]).all()
+    assert lifted.xyz[0, 2] == pytest.approx(1.0)
+
+    xyz = registration.points_xyz(
+        workspace.undistorted, np.array([[212, 256], [0, 0]], dtype=np.int64)
+    )
+    assert xyz.shape == (2, 3)
+    assert np.isfinite(xyz[0]).all()
+    with pytest.raises(IndexError):
+        registration.points_xyz(workspace.undistorted, [[424, 0]])
+
+    with pytest.warns(DeprecationWarning, match="include_color_depth_map"):
+        deprecated = registration.apply(color, depth, include_color_depth_map=True)
+    assert deprecated.depth_to_color_map is not None
+    with pytest.warns(DeprecationWarning, match="color_depth_map"):
+        assert deprecated.color_depth_map is deprecated.depth_to_color_map
+    with pytest.raises(ValueError, match="conflicting"):
+        registration.apply(
+            color,
+            depth,
+            include_depth_to_color_map=True,
+            include_color_depth_map=False,
+        )
+
+
+def test_pipeline_config_device_diagnostics_and_calibration_matrices() -> None:
+    config = f3.PacketPipelineConfig(
+        rgb_decoder=f3.RgbDecoder.TURBOJPEG, allow_fallback=False
+    )
+    pipeline = f3.lowlevel.CpuPacketPipeline(config=config)
+    with pytest.raises(ValueError, match="preconstructed"):
+        f3.lowlevel.ReplayContext().open_device(
+            ["missing_color_1_1.jpg"], pipeline=pipeline, pipeline_config=config
+        )
+    device = f3.lowlevel.ReplayContext().open_device(
+        ["missing_color_1_1.jpg"], pipeline="cpu", pipeline_config=config
+    )
+    assert device.state is f3.DeviceState.OPEN
+    assert device.last_error == ""
+    device.close()
+    assert device.state is f3.DeviceState.CLOSED
+
+    ir = f3.IrCameraParams(
+        fx=2.0, fy=3.0, cx=4.0, cy=5.0, k1=1.0, k2=2.0, k3=3.0, p1=4.0, p2=5.0
+    )
+    assert ir.camera_matrix().dtype == np.float64
+    assert ir.camera_matrix().tolist() == [
+        [2.0, 0.0, 4.0],
+        [0.0, 3.0, 5.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert ir.distortion_coefficients().tolist() == [1.0, 2.0, 4.0, 5.0, 3.0]
+    assert not f3.lowlevel.Context().wait_for_device("not-present", 0)

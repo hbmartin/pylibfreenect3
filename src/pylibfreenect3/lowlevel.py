@@ -6,6 +6,7 @@ manage native device lifecycles directly.
 """
 
 from .api import (
+    AlignedFrameListener,
     Context,
     CpuPacketPipeline,
     CudaKdePacketPipeline,
@@ -22,6 +23,7 @@ from .api import (
 )
 
 __all__ = [
+    "AlignedFrameListener",
     "Context",
     "CpuPacketPipeline",
     "CudaKdePacketPipeline",

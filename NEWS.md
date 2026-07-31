@@ -11,6 +11,18 @@
 - `Camera.capture` and `Camera.frames` now default to `timeout=2.0` seconds
   instead of blocking indefinitely; pass `timeout=None` for the 0.3 behavior.
 - Retains libfreenect2-metal 0.3/API 3 and recording schema-v1 compatibility.
+- Adds opt-in timestamp alignment, arrival timestamps, delivery/drop
+  statistics, pipeline decoder configuration, device state diagnostics, and
+  interruptible device waiting.
+- Adds native BGR/RGB conversion, OpenCV-compatible IR calibration arrays,
+  reusable registration workspaces, forward and reverse maps, batched XYZ,
+  and normalized color-landmark lifting without new runtime dependencies.
+- Moves the full MediaPipe pose demo from the core repository and adds an
+  aligned OpenCV viewer; both examples use a 25 ms threshold and queue capacity
+  eight.
+- Renames `include_color_depth_map` and `color_depth_map` to
+  `include_depth_to_color_map` and `depth_to_color_map`; the old names warn as
+  deprecated aliases.
 
 ## 0.3.0
 

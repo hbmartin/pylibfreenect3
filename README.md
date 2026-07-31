@@ -15,6 +15,7 @@ Modern, typed, ownership-safe Python bindings for Microsoft Kinect v2 through
 - zero-copy NumPy views with explicit, safe frame lifetimes;
 - CPU and Apple Metal packet-processing backends in prebuilt wheels;
 - camera registration, configuration, exposure, and LED controls;
+- opt-in timestamp alignment and reusable OpenCV/MediaPipe vision primitives;
 - checksummed recording bundles and deterministic replay; and
 - a typed low-level API for applications that need direct device control.
 
@@ -69,16 +70,21 @@ Open the default device, wait up to two seconds for a synchronized color/depth
 pair, and expose both frames as NumPy arrays:
 
 ```python
-from pylibfreenect3 import Camera
+from pylibfreenect3 import AlignmentConfig, Camera
 
-with Camera.open(pipeline="auto", streams=("color", "depth")) as camera:
+with Camera.open(
+    pipeline="auto",
+    streams=("color", "depth"),
+    alignment=AlignmentConfig(max_delta=0.025, queue_capacity=8),
+) as camera:
     with camera.capture() as frames:
-        color = frames.color.to_numpy()
+        color = frames.color.to_color()  # contiguous BGR uint8
         depth = frames.depth.to_numpy()
 
         print("pipeline:", camera.pipeline)
         print("color:", color.shape, color.dtype)
         print("depth:", depth.shape, depth.dtype)
+        print("alignment delta:", frames.alignment_delta_seconds)
 ```
 
 A normal decoded capture has these layouts:
@@ -89,7 +95,7 @@ A normal decoded capture has these layouts:
 | `ir` | `(424, 512)` | `float32` | Infrared intensity |
 | `depth` | `(424, 512)` | `float32` | Depth in millimetres |
 
-See the [OpenCV and registration cookbook](docs/cookbook.rst) for channel
+See the [OpenCV and registration cookbook](docs/cookbook.md) for channel
 conversion, lossless depth storage, coordinate maps, offline registration,
 image flips, and slow-consumer guidance.
 
@@ -152,19 +158,21 @@ usually the cheapest option when only one stream needs to outlive the capture.
 
 ## Registration
 
-`Registration` uses the active device's calibration to align color with depth:
+`Registration` uses the active device's calibration to align color with depth.
+Use a workspace in a live vision loop to keep output buffer identities stable:
 
 ```python
 from pylibfreenect3 import Camera, Registration
 
 with Camera.open(streams=("color", "depth")) as camera:
-    registration = Registration(
-        camera.device.ir_camera_params,
-        camera.device.color_camera_params,
+    registration = Registration.from_device(camera.device)
+    workspace = registration.workspace(
+        include_depth_to_color_map=True,
+        include_color_to_depth_map=True,
     )
 
     with camera.capture(timeout=2.0) as frames:
-        result = registration.apply(frames.color, frames.depth)
+        result = workspace.apply(frames.color, frames.depth)
         undistorted_depth = result.undistorted.to_numpy()
         registered_color = result.registered.to_numpy()
 
@@ -172,19 +180,28 @@ with Camera.open(streams=("color", "depth")) as camera:
         print(x, y, z)
 ```
 
-`Registration.apply()` can also produce the 1920×1082 `big_depth` frame and a
-512×424 color/depth index map:
+Direct `Registration.apply()` remains allocating and independently owned. It
+can also produce the 1920×1082 `big_depth` frame, a depth-to-color map, and a
+nearest-depth color-to-depth reverse map:
 
 ```python
 result = registration.apply(
     frames.color,
     frames.depth,
     include_big_depth=True,
-    include_color_depth_map=True,
+    include_depth_to_color_map=True,
+    include_color_to_depth_map=True,
 )
 ```
 
-The [cookbook](docs/cookbook.rst) documents the output layouts and shows how
+`workspace.lift_normalized()` lifts a batch of normalized color coordinates
+to metric XYZ plus validity and selected depth pixels. The complete
+[`opencv_viewer.py`](examples/opencv_viewer.py) and
+[`mediapipe_pose`](examples/mediapipe_pose/README.md) examples use aligned
+capture with a 25 ms threshold and queue capacity eight. OpenCV, MediaPipe, and
+Pillow are not package dependencies.
+
+The [cookbook](docs/cookbook.md) documents the output layouts and shows how
 to register saved color and filtered-depth arrays safely.
 
 ## Pipelines
@@ -199,6 +216,10 @@ with Camera.open(pipeline="metal") as camera:  # Apple silicon wheel
 with Camera.open(pipeline="cpu") as camera:    # macOS or Linux wheel
     print(camera.pipeline)
 ```
+
+`PacketPipelineConfig` selects TurboJPEG or another compiled RGB decoder and
+controls fallback. Passing a separate config with an already constructed
+low-level `PacketPipeline` is rejected because pipeline objects are single-use.
 
 Canonical names are `cpu`, `metal`, `opengl`, `opencl`, `opencl_kde`, `cuda`,
 `cuda_kde`, and `dump`. The prebuilt-wheel support is summarized above;
@@ -430,7 +451,7 @@ as errors:
 
 ```console
 uv run pytest -m 'not hardware'
-uv run sphinx-build -W --keep-going docs docs/_build/html
+uv run zensical build --clean --strict
 ```
 
 With a Kinect v2 attached, run the hardware tests explicitly:
@@ -439,8 +460,8 @@ With a Kinect v2 attached, run the hardware tests explicitly:
 uv run pytest tests/test_hardware.py -m hardware
 ```
 
-See [`examples/`](examples), the [Sphinx documentation](docs/index.rst), and
-the [release gates](docs/dev.rst) for more detail. Issues and pull requests are
+See [`examples/`](examples), the [documentation](https://hbmartin.github.io/pylibfreenect3/), and
+the [release gates](docs/dev.md) for more detail. Issues and pull requests are
 welcome in the [GitHub repository](https://github.com/hbmartin/pylibfreenect3).
 
 ## License

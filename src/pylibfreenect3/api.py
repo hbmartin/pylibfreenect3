@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import isfinite
 from os import PathLike, fspath
 from typing import ClassVar, cast, overload
+from warnings import warn
 
 import numpy as np
 import numpy.typing as npt
@@ -12,21 +13,29 @@ import numpy.typing as npt
 from . import _native
 from .errors import DeviceOpenError, DeviceStateError, ReplayError
 from .types import (
+    AlignmentConfig,
+    AlignmentStats,
     ColorCameraParams,
+    ColorOrder,
     ColorSettingCommand,
+    DepthSearchOptions,
     DeviceConfig,
+    DeviceState,
     FrameFormat,
     FrameType,
     IrCameraParams,
     LedSettings,
     LoggerLevel,
+    PacketPipelineConfig,
     Pipeline,
     ReplayCalibration,
+    RgbDecoder,
     Stream,
     _dataclass_from_mapping,
 )
 
 __all__ = [
+    "AlignedFrameListener",
     "Camera",
     "Context",
     "CpuPacketPipeline",
@@ -37,6 +46,7 @@ __all__ = [
     "Frame",
     "FrameListener",
     "FrameSet",
+    "LandmarkLiftResult",
     "MetalPacketPipeline",
     "OpenCLKdePacketPipeline",
     "OpenCLPacketPipeline",
@@ -44,6 +54,7 @@ __all__ = [
     "PacketPipeline",
     "Registration",
     "RegistrationResult",
+    "RegistrationWorkspace",
     "ReplayContext",
     "available_pipelines",
     "compiled_pipelines",
@@ -63,6 +74,9 @@ _STREAM_TYPES: Mapping[Stream, FrameType] = {
 }
 
 type _FrameArray = npt.NDArray[np.uint8] | npt.NDArray[np.float32]
+
+_DEFAULT_ALIGNMENT_CONFIG = AlignmentConfig()
+_DEFAULT_DEPTH_SEARCH_OPTIONS = DepthSearchOptions()
 
 
 def core_version() -> str:
@@ -107,12 +121,36 @@ def set_global_log_level(level: LoggerLevel | None) -> None:
 class PacketPipeline:
     name: ClassVar[Pipeline]
 
-    def __init__(self, device_id: int = -1) -> None:
-        self._native = _native.NativePipeline(self.name.value, device_id)
+    def __init__(
+        self,
+        device_id: int = -1,
+        *,
+        config: PacketPipelineConfig | None = None,
+    ) -> None:
+        selected = PacketPipelineConfig() if config is None else config
+        decoder = {
+            RgbDecoder.AUTO: 0,
+            RgbDecoder.TURBOJPEG: 1,
+            RgbDecoder.VIDEOTOOLBOX: 2,
+            RgbDecoder.VAAPI: 3,
+            RgbDecoder.TEGRAJPEG: 4,
+        }[selected.rgb_decoder]
+        self.config = selected
+        self._native = _native.NativePipeline(
+            self.name.value,
+            device_id,
+            decoder,
+            selected.vaapi_device,
+            selected.allow_fallback,
+        )
 
     @property
     def consumed(self) -> bool:
         return self._native.is_consumed
+
+
+class _DefaultPacketPipeline(PacketPipeline):
+    name = Pipeline.AUTO
 
 
 class CpuPacketPipeline(PacketPipeline):
@@ -176,14 +214,22 @@ _PIPELINE_TYPES: Mapping[Pipeline, type[PacketPipeline]] = {
 
 def _coerce_pipeline(
     value: str | Pipeline | PacketPipeline | None,
+    config: PacketPipelineConfig | None = None,
 ) -> PacketPipeline | None:
     if value is None:
         return None
     if isinstance(value, PacketPipeline):
+        if config is not None:
+            raise ValueError(
+                "pipeline_config cannot be supplied with a preconstructed "
+                "PacketPipeline"
+            )
         return value
     try:
         name = Pipeline(str(value).lower())
-        return None if name is Pipeline.AUTO else _PIPELINE_TYPES[name]()
+        if name is Pipeline.AUTO:
+            return _DefaultPacketPipeline(config=config)
+        return _PIPELINE_TYPES[name](config=config)
     except (KeyError, ValueError) as error:
         raise ValueError(f"unknown pipeline: {value!r}") from error
 
@@ -202,6 +248,7 @@ class Frame:
         frame_type: FrameType | None = None,
         frame_format: FrameFormat = FrameFormat.INVALID,
         timestamp: int = 0,
+        arrival_timestamp_us: int = 0,
         sequence: int = 0,
         exposure: float = 0.0,
         gain: float = 0.0,
@@ -235,6 +282,7 @@ class Frame:
                 int(frame_format),
                 timestamp,
                 sequence,
+                arrival_timestamp_us,
                 exposure,
                 gain,
                 gamma,
@@ -250,6 +298,7 @@ class Frame:
         frame_type: FrameType | None = None,
         frame_format: FrameFormat | None = None,
         timestamp: int = 0,
+        arrival_timestamp_us: int = 0,
         sequence: int = 0,
         exposure: float = 0.0,
         gain: float = 0.0,
@@ -299,6 +348,7 @@ class Frame:
                 int(frame_format),
                 timestamp,
                 sequence,
+                arrival_timestamp_us,
                 exposure,
                 gain,
                 gamma,
@@ -321,6 +371,10 @@ class Frame:
     @property
     def timestamp(self) -> int:
         return self._native.timestamp
+
+    @property
+    def arrival_timestamp_us(self) -> int:
+        return self._native.arrival_timestamp_us
 
     @property
     def sequence(self) -> int:
@@ -353,6 +407,35 @@ class Frame:
     def to_numpy(self, *, copy: bool = False) -> _FrameArray:
         return self._native.to_numpy(copy)
 
+    def to_color(
+        self,
+        order: ColorOrder = ColorOrder.BGR,
+        *,
+        out: npt.NDArray[np.uint8] | None = None,
+    ) -> npt.NDArray[np.uint8]:
+        """Convert packed BGRX/RGBX data to contiguous BGR or RGB."""
+        selected = ColorOrder(order)
+        if self.format not in (FrameFormat.BGRX, FrameFormat.RGBX):
+            raise ValueError("to_color() requires a BGRX or RGBX frame")
+        if out is None:
+            destination = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        else:
+            if not isinstance(out, np.ndarray):
+                raise TypeError("out must be a NumPy array")
+            destination = out
+            if destination.dtype != np.dtype(np.uint8):
+                raise TypeError("out must use dtype uint8")
+            if destination.shape != (self.height, self.width, 3):
+                raise ValueError(
+                    f"out must have shape ({self.height}, {self.width}, 3)"
+                )
+            if not destination.flags.writeable:
+                raise ValueError("out must be writable")
+            if not destination.flags.c_contiguous:
+                raise ValueError("out must be C-contiguous")
+        self._native.to_color(destination, 0 if selected is ColorOrder.BGR else 1)
+        return destination
+
     @overload
     def __array__(
         self, dtype: None = None, copy: bool | None = None
@@ -381,10 +464,14 @@ class FrameSet(Mapping[FrameType, Frame]):
         self,
         native: _native.NativeFrameSet | None = None,
         copied: Mapping[FrameType, Frame] | None = None,
+        alignment_delta_ticks: int | None = None,
     ) -> None:
         self._native = native
         self._copied = dict(copied or {})
         self._released = False
+        self._alignment_delta_ticks = (
+            native.delta_ticks if native is not None else alignment_delta_ticks
+        )
 
     def __enter__(self) -> FrameSet:
         if self._released:
@@ -456,6 +543,7 @@ class FrameSet(Mapping[FrameType, Frame]):
                         frame_type=frame_type,
                         frame_format=source.format,
                         timestamp=source.timestamp,
+                        arrival_timestamp_us=source.arrival_timestamp_us,
                         sequence=source.sequence,
                         exposure=source.exposure,
                         gain=source.gain,
@@ -464,7 +552,9 @@ class FrameSet(Mapping[FrameType, Frame]):
                     )
         finally:
             self.release()
-        return FrameSet(copied=copied)
+        return FrameSet(
+            copied=copied, alignment_delta_ticks=self._alignment_delta_ticks
+        )
 
     def release(self) -> None:
         if self._released:
@@ -478,6 +568,16 @@ class FrameSet(Mapping[FrameType, Frame]):
     @property
     def released(self) -> bool:
         return self._released
+
+    @property
+    def alignment_delta_ticks(self) -> int | None:
+        return self._alignment_delta_ticks
+
+    @property
+    def alignment_delta_seconds(self) -> float | None:
+        if self._alignment_delta_ticks is None:
+            return None
+        return self._alignment_delta_ticks * 0.000125
 
 
 class FrameListener:
@@ -494,6 +594,33 @@ class FrameListener:
 
     def wait(self, timeout: float | None = None) -> FrameSet:
         return FrameSet(self._native.wait(timeout))
+
+
+class AlignedFrameListener:
+    def __init__(
+        self,
+        frame_types: FrameType,
+        config: AlignmentConfig = _DEFAULT_ALIGNMENT_CONFIG,
+    ) -> None:
+        self.frame_types: FrameType = FrameType(frame_types)
+        if not self.frame_types or int(self.frame_types) & ~int(
+            FrameType.COLOR | FrameType.IR | FrameType.DEPTH
+        ):
+            raise ValueError("frame_types must select color, IR, and/or depth")
+        self.config = config
+        self._native = _native.NativeAlignedFrameListener(
+            int(self.frame_types), config.max_delta_ticks, config.queue_capacity
+        )
+
+    def has_new_frame(self) -> bool:
+        return self._native.has_new_frame()
+
+    def wait(self, timeout: float | None = None) -> FrameSet:
+        return FrameSet(self._native.wait(timeout))
+
+    @property
+    def alignment_stats(self) -> AlignmentStats:
+        return _dataclass_from_mapping(AlignmentStats, self._native.statistics())
 
 
 class Device:
@@ -563,10 +690,14 @@ class Device:
     def configuration(self, value: DeviceConfig) -> None:
         self.set_configuration(value)
 
-    def set_color_listener(self, listener: FrameListener) -> None:
+    def set_color_listener(
+        self, listener: FrameListener | AlignedFrameListener
+    ) -> None:
         self._native.set_color_listener(listener._native)
 
-    def set_depth_listener(self, listener: FrameListener) -> None:
+    def set_depth_listener(
+        self, listener: FrameListener | AlignedFrameListener
+    ) -> None:
         self._native.set_depth_listener(listener._native)
 
     def set_color_auto_exposure(self, compensation: float = 0.0) -> None:
@@ -610,6 +741,14 @@ class Device:
     def closed(self) -> bool:
         return self._native.is_closed
 
+    @property
+    def state(self) -> DeviceState:
+        return DeviceState(self._native.state)
+
+    @property
+    def last_error(self) -> str:
+        return self._native.last_error
+
 
 class Context:
     VENDOR_ID = 0x045E
@@ -628,13 +767,19 @@ class Context:
     def default_device_serial_number(self) -> str:
         return self._native.default_device_serial_number()
 
+    def wait_for_device(
+        self, serial: str, timeout: float, poll_interval: float = 0.25
+    ) -> bool:
+        return self._native.wait_for_device(serial, timeout, poll_interval)
+
     def open_device(
         self,
         name: str | int | None = None,
         *,
         pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        pipeline_config: PacketPipelineConfig | None = None,
     ) -> Device:
-        selected = _coerce_pipeline(pipeline)
+        selected = _coerce_pipeline(pipeline, pipeline_config)
         return Device(
             self._native.open_device(
                 name, None if selected is None else selected._native
@@ -653,8 +798,9 @@ class ReplayContext:
         *,
         calibration: ReplayCalibration | None = None,
         pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        pipeline_config: PacketPipelineConfig | None = None,
     ) -> Device:
-        if isinstance(filenames, (str, PathLike)):
+        if isinstance(filenames, str | PathLike):
             paths = [fspath(filenames)]
         else:
             paths = [fspath(filename) for filename in filenames]
@@ -662,7 +808,7 @@ class ReplayContext:
             path.lower().endswith(".depth") for path in paths
         ):
             raise ReplayError("depth replay requires explicit calibration")
-        selected = _coerce_pipeline(pipeline)
+        selected = _coerce_pipeline(pipeline, pipeline_config)
         try:
             native = self._native.open_device(
                 paths,
@@ -679,7 +825,24 @@ class RegistrationResult:
     undistorted: Frame
     registered: Frame
     big_depth: Frame | None = None
-    color_depth_map: npt.NDArray[np.int32] | None = None
+    depth_to_color_map: npt.NDArray[np.int32] | None = None
+    color_to_depth_map: npt.NDArray[np.int32] | None = None
+
+    @property
+    def color_depth_map(self) -> npt.NDArray[np.int32] | None:
+        warn(
+            "color_depth_map is deprecated; use depth_to_color_map",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.depth_to_color_map
+
+
+@dataclass(slots=True)
+class LandmarkLiftResult:
+    xyz: npt.NDArray[np.float32]
+    valid: npt.NDArray[np.bool_]
+    depth_pixels: npt.NDArray[np.int32]
 
 
 class Registration:
@@ -687,6 +850,10 @@ class Registration:
         self, ir_params: IrCameraParams, color_params: ColorCameraParams
     ) -> None:
         self._native = _native.NativeRegistrationHandle(ir_params, color_params)
+
+    @classmethod
+    def from_device(cls, device: Device) -> Registration:
+        return cls(device.ir_camera_params, device.color_camera_params)
 
     def apply_point(self, dx: int, dy: int, depth_mm: float) -> tuple[float, float]:
         self._validate_point(dy, dx)
@@ -701,19 +868,26 @@ class Registration:
         *,
         enable_filter: bool = True,
         include_big_depth: bool = False,
-        include_color_depth_map: bool = False,
+        include_depth_to_color_map: bool | None = None,
+        include_color_to_depth_map: bool = False,
+        include_color_depth_map: bool | None = None,
     ) -> RegistrationResult:
+        include_forward = self._resolve_map_alias(
+            include_depth_to_color_map, include_color_depth_map
+        )
         self._validate_color(color)
         self._validate_depth(depth)
         undistorted = Frame.allocate(512, 424, 4, frame_format=FrameFormat.FLOAT)
-        registered = Frame.allocate(512, 424, 4, frame_format=FrameFormat.BGRX)
+        registered = Frame.allocate(512, 424, 4, frame_format=color.format)
         big_depth = (
             Frame.allocate(1920, 1082, 4, frame_format=FrameFormat.FLOAT)
             if include_big_depth
             else None
         )
-        mapping = (
-            np.empty((424, 512), dtype=np.int32) if include_color_depth_map else None
+        internal_mapping = (
+            np.empty((424, 512), dtype=np.int32)
+            if include_forward or include_color_to_depth_map
+            else None
         )
         self._native.apply(
             color._native,
@@ -722,9 +896,41 @@ class Registration:
             registered._native,
             enable_filter,
             None if big_depth is None else big_depth._native,
-            mapping,
+            internal_mapping,
         )
-        return RegistrationResult(undistorted, registered, big_depth, mapping)
+        reverse = None
+        if include_color_to_depth_map:
+            if internal_mapping is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("depth-to-color workspace was not allocated")
+            reverse = np.empty((1080, 1920), dtype=np.int32)
+            self._native.build_color_to_depth_map(
+                undistorted._native, internal_mapping, reverse
+            )
+        return RegistrationResult(
+            undistorted,
+            registered,
+            big_depth,
+            internal_mapping if include_forward else None,
+            reverse,
+        )
+
+    def workspace(
+        self,
+        *,
+        include_big_depth: bool = False,
+        include_depth_to_color_map: bool | None = None,
+        include_color_to_depth_map: bool = False,
+        include_color_depth_map: bool | None = None,
+    ) -> RegistrationWorkspace:
+        include_forward = self._resolve_map_alias(
+            include_depth_to_color_map, include_color_depth_map
+        )
+        return RegistrationWorkspace(
+            self,
+            include_big_depth=include_big_depth,
+            include_depth_to_color_map=include_forward,
+            include_color_to_depth_map=include_color_to_depth_map,
+        )
 
     def undistort_depth(self, depth: Frame) -> Frame:
         self._validate_depth(depth)
@@ -758,6 +964,40 @@ class Registration:
             undistorted._native, registered._native, row, column
         )
 
+    def points_xyz(
+        self, undistorted: Frame, pixels: npt.ArrayLike
+    ) -> npt.NDArray[np.float32]:
+        self._validate_depth(undistorted)
+        values = np.asarray(pixels)
+        if values.ndim != 2 or values.shape[1] != 2:
+            raise ValueError("pixels must have shape (N, 2)")
+        if not np.issubdtype(values.dtype, np.integer):
+            raise TypeError("pixels must contain integer row/column coordinates")
+        if values.size and (
+            np.any(values[:, 0] < 0)
+            or np.any(values[:, 0] >= 424)
+            or np.any(values[:, 1] < 0)
+            or np.any(values[:, 1] >= 512)
+        ):
+            raise IndexError("depth coordinates are outside the 512x424 frame")
+        coordinates = np.ascontiguousarray(values, dtype=np.int32)
+        return self._native.points_xyz(undistorted._native, coordinates)
+
+    @staticmethod
+    def _resolve_map_alias(canonical: bool | None, deprecated: bool | None) -> bool:
+        if canonical is not None and deprecated is not None and canonical != deprecated:
+            raise ValueError(
+                "conflicting include_depth_to_color_map and "
+                "include_color_depth_map values"
+            )
+        if deprecated is not None:
+            warn(
+                "include_color_depth_map is deprecated; use include_depth_to_color_map",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        return bool(canonical if canonical is not None else deprecated)
+
     @staticmethod
     def _validate_color(frame: Frame) -> None:
         if (
@@ -786,17 +1026,125 @@ class Registration:
             raise IndexError("depth coordinates are outside the 512x424 frame")
 
 
+class RegistrationWorkspace:
+    """Reusable registration buffers whose contents are overwritten by apply()."""
+
+    def __init__(
+        self,
+        registration: Registration,
+        *,
+        include_big_depth: bool,
+        include_depth_to_color_map: bool,
+        include_color_to_depth_map: bool,
+    ) -> None:
+        self.registration: Registration = registration
+        self.undistorted: Frame = Frame.allocate(
+            512, 424, 4, frame_format=FrameFormat.FLOAT
+        )
+        # The core assigns the actual packed color order on every apply.
+        self.registered: Frame = Frame.allocate(
+            512, 424, 4, frame_format=FrameFormat.BGRX
+        )
+        self.big_depth: Frame | None = (
+            Frame.allocate(1920, 1082, 4, frame_format=FrameFormat.FLOAT)
+            if include_big_depth
+            else None
+        )
+        self._internal_depth_to_color_map: npt.NDArray[np.int32] | None = (
+            np.empty((424, 512), dtype=np.int32)
+            if include_depth_to_color_map or include_color_to_depth_map
+            else None
+        )
+        self.depth_to_color_map: npt.NDArray[np.int32] | None = (
+            self._internal_depth_to_color_map if include_depth_to_color_map else None
+        )
+        self.color_to_depth_map: npt.NDArray[np.int32] | None = (
+            np.empty((1080, 1920), dtype=np.int32)
+            if include_color_to_depth_map
+            else None
+        )
+        self.result: RegistrationResult = RegistrationResult(
+            self.undistorted,
+            self.registered,
+            self.big_depth,
+            self.depth_to_color_map,
+            self.color_to_depth_map,
+        )
+        self._has_applied = False
+
+    def apply(
+        self, color: Frame, depth: Frame, *, enable_filter: bool = True
+    ) -> RegistrationResult:
+        self.registration._validate_color(color)
+        self.registration._validate_depth(depth)
+        self.registration._native.apply(
+            color._native,
+            depth._native,
+            self.undistorted._native,
+            self.registered._native,
+            enable_filter,
+            None if self.big_depth is None else self.big_depth._native,
+            self._internal_depth_to_color_map,
+        )
+        if self.color_to_depth_map is not None:
+            if self._internal_depth_to_color_map is None:  # pragma: no cover
+                raise RuntimeError("depth-to-color workspace was not allocated")
+            self.registration._native.build_color_to_depth_map(
+                self.undistorted._native,
+                self._internal_depth_to_color_map,
+                self.color_to_depth_map,
+            )
+        self._has_applied = True
+        return self.result
+
+    def lift_normalized(
+        self,
+        xy: npt.ArrayLike,
+        options: DepthSearchOptions = _DEFAULT_DEPTH_SEARCH_OPTIONS,
+    ) -> LandmarkLiftResult:
+        if not self._has_applied:
+            raise DeviceStateError("registration workspace has not been applied")
+        if self.color_to_depth_map is None:
+            raise DeviceStateError(
+                "workspace was created without include_color_to_depth_map=True"
+            )
+        values = np.asarray(xy)
+        if values.ndim != 2 or values.shape[1] != 2:
+            raise ValueError("xy must have shape (N, 2)")
+        if not np.issubdtype(values.dtype, np.number):
+            raise TypeError("xy must contain numeric normalized coordinates")
+        points = np.ascontiguousarray(values, dtype=np.float32)
+        xyz, valid, indices = self.registration._native.lift_normalized(
+            self.undistorted._native,
+            self.color_to_depth_map,
+            points,
+            options.primary_radius,
+            options.fallback_radius,
+            options.cluster_span_mm,
+        )
+        linear = indices
+        depth_pixels = np.full((linear.shape[0], 2), -1, dtype=np.int32)
+        present = linear >= 0
+        depth_pixels[present, 0] = linear[present] // 512
+        depth_pixels[present, 1] = linear[present] % 512
+        return LandmarkLiftResult(
+            xyz,
+            valid,
+            depth_pixels,
+        )
+
+
 class Camera:
     def __init__(
         self,
         context: Context | ReplayContext,
         device: Device,
-        listener: FrameListener,
+        listener: FrameListener | AlignedFrameListener,
         streams: tuple[Stream, ...],
     ) -> None:
         self.context: Context | ReplayContext = context
         self.device: Device = device
-        self.listener: FrameListener = listener
+        self.listener: FrameListener | AlignedFrameListener = listener
         self.streams: tuple[Stream, ...] = streams
         self._closed = False
 
@@ -806,12 +1154,16 @@ class Camera:
         *,
         device: str | int | None = None,
         pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        pipeline_config: PacketPipelineConfig | None = None,
+        alignment: AlignmentConfig | None = None,
         streams: Iterable[str | Stream] = (Stream.COLOR, Stream.DEPTH),
     ) -> Camera:
         names = cls._normalize_streams(streams)
         context = Context()
-        opened = context.open_device(device, pipeline=pipeline)
-        return cls._start(context, opened, names)
+        opened = context.open_device(
+            device, pipeline=pipeline, pipeline_config=pipeline_config
+        )
+        return cls._start(context, opened, names, alignment)
 
     @classmethod
     def open_recording(
@@ -819,6 +1171,8 @@ class Camera:
         path: str | PathLike[str],
         *,
         pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        pipeline_config: PacketPipelineConfig | None = None,
+        alignment: AlignmentConfig | None = None,
         streams: Iterable[str | Stream] | None = None,
     ) -> Camera:
         from .recording import RecordingBundle
@@ -830,8 +1184,9 @@ class Camera:
             bundle.frame_paths(names),
             calibration=bundle.calibration,
             pipeline=pipeline,
+            pipeline_config=pipeline_config,
         )
-        return cls._start(context, opened, names)
+        return cls._start(context, opened, names, alignment)
 
     @staticmethod
     def _normalize_streams(streams: Iterable[str | Stream]) -> tuple[Stream, ...]:
@@ -851,11 +1206,16 @@ class Camera:
         context: Context | ReplayContext,
         device: Device,
         streams: tuple[Stream, ...],
+        alignment: AlignmentConfig | None,
     ) -> Camera:
         mask = FrameType(0)
         for stream in streams:
             mask |= _STREAM_TYPES[stream]
-        listener = FrameListener(mask)
+        listener: FrameListener | AlignedFrameListener = (
+            FrameListener(mask)
+            if alignment is None
+            else AlignedFrameListener(mask, alignment)
+        )
         try:
             if Stream.COLOR in streams:
                 device.set_color_listener(listener)
@@ -881,6 +1241,12 @@ class Camera:
     @property
     def pipeline(self) -> Pipeline:
         return self.device.pipeline_name
+
+    @property
+    def alignment_stats(self) -> AlignmentStats | None:
+        if isinstance(self.listener, AlignedFrameListener):
+            return self.listener.alignment_stats
+        return None
 
     def capture(self, *, timeout: float | None = 2.0, copy: bool = False) -> FrameSet:
         if self._closed:
