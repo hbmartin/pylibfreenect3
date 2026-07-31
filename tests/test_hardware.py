@@ -15,13 +15,12 @@ from pylibfreenect3 import (
     DeviceConfig,
     FrameFormat,
     FrameType,
-    Freenect2,
     LedSettings,
     RecordingWriter,
     Registration,
-    SyncFrameListener,
     available_pipelines,
 )
+from pylibfreenect3.lowlevel import Context, FrameListener
 
 AVAILABLE_PIPELINES = available_pipelines()
 METAL_UNAVAILABLE = pytest.mark.skipif(
@@ -65,9 +64,9 @@ def test_kinect_capture_100_frames(pipeline: str) -> None:
         )
         for index in range(100):
             with camera.capture(timeout=2.0) as frames:
-                assert frames.color.type is FrameType.COLOR
-                assert frames.ir.type is FrameType.IR
-                assert frames.depth.type is FrameType.DEPTH
+                assert frames.color.frame_type is FrameType.COLOR
+                assert frames.ir.frame_type is FrameType.IR
+                assert frames.depth.frame_type is FrameType.DEPTH
                 assert frames.color.format in (FrameFormat.BGRX, FrameFormat.RGBX)
                 assert frames.ir.format is FrameFormat.FLOAT
                 assert frames.depth.format is FrameFormat.FLOAT
@@ -125,9 +124,9 @@ def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
 
 @pytest.mark.hardware
 def test_cpu_capture_configuration_restart_and_outstanding_array() -> None:
-    context = Freenect2()
+    context = Context()
     device = context.open_device(pipeline="cpu")
-    listener = SyncFrameListener(FrameType.COLOR | FrameType.IR | FrameType.DEPTH)
+    listener = FrameListener(FrameType.COLOR | FrameType.IR | FrameType.DEPTH)
     device.configuration = DeviceConfig(
         min_depth=0.6,
         max_depth=5.0,
@@ -170,17 +169,21 @@ def test_repeated_open_close() -> None:
 @pytest.mark.hardware
 def test_dump_recording_and_cpu_metal_replay(tmp_path: Path) -> None:
     recording_path = tmp_path / "capture.f3"
-    with Camera.open(pipeline="dump", streams=("color", "ir", "depth")) as camera:
-        with RecordingWriter(recording_path, camera) as writer:
-            writer.capture(10, timeout=2.0)
+    with (
+        Camera.open(pipeline="dump", streams=("color", "ir", "depth")) as camera,
+        RecordingWriter(recording_path, camera) as writer,
+    ):
+        writer.capture(10, timeout=2.0)
 
     replay_pipelines = ("cpu", "metal") if "metal" in AVAILABLE_PIPELINES else ("cpu",)
     for pipeline in replay_pipelines:
-        with Camera.open_recording(recording_path, pipeline=pipeline) as replay:
-            with replay.capture(timeout=5.0) as frames:
-                assert replay.pipeline == pipeline
-                assert frames.color.to_numpy().shape == (1080, 1920, 4)
-                assert frames.depth.to_numpy().shape == (424, 512)
+        with (
+            Camera.open_recording(recording_path, pipeline=pipeline) as replay,
+            replay.capture(timeout=5.0) as frames,
+        ):
+            assert replay.pipeline == pipeline
+            assert frames.color.to_numpy().shape == (1080, 1920, 4)
+            assert frames.depth.to_numpy().shape == (424, 512)
 
 
 _OUTSTANDING_AT_SHUTDOWN: np.ndarray | None = None

@@ -8,7 +8,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-
 FORBIDDEN_PREFIXES = ("/opt/homebrew", "/usr/local", "/private/tmp", "/tmp/")
 LICENSE_NAMES = {
     "libfreenect2-APACHE20.txt",
@@ -22,8 +21,9 @@ LICENSE_NAMES = {
 def run(command: list[str]) -> str:
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode:
+        output = result.stdout + result.stderr
         raise RuntimeError(
-            f"{' '.join(command)} failed with {result.returncode}\n{result.stdout}{result.stderr}"
+            f"{' '.join(command)} failed with {result.returncode}\n{output}"
         )
     return result.stdout + result.stderr
 
@@ -59,6 +59,33 @@ def verify_linux(binary: Path) -> None:
 def verify(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
+        package_names = {
+            name.removeprefix("pylibfreenect3/")
+            for name in names
+            if name.startswith("pylibfreenect3/")
+        }
+        required_package_files = {
+            "__init__.py",
+            "_native.pyi",
+            "api.py",
+            "errors.py",
+            "lowlevel.py",
+            "py.typed",
+            "recording.py",
+            "types.py",
+        }
+        missing_package_files = required_package_files - package_names
+        if missing_package_files:
+            raise RuntimeError(
+                f"wheel is missing package files: {sorted(missing_package_files)}"
+            )
+        forbidden_sources = [
+            name for name in names if name.endswith((".pyx", ".pxd", ".cpp"))
+        ]
+        if forbidden_sources:
+            raise RuntimeError(
+                f"wheel contains native build sources: {forbidden_sources}"
+            )
         packaged_licenses = {Path(name).name for name in names if "/licenses/" in name}
         missing = LICENSE_NAMES - packaged_licenses
         if missing:

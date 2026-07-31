@@ -3,7 +3,16 @@ Development and release gates
 
 Run hardware-free tests with::
 
-   pytest -m "not hardware"
+   uv sync
+   uv run pytest -m "not hardware"
+
+Run the complete fast quality gate with::
+
+   uv run ruff check .
+   uv run ruff format --check .
+   uv run cython-lint --max-line-length 120 src/pylibfreenect3/_native.pyx
+   uv run mypy
+   uv run pyright --verifytypes pylibfreenect3 --ignoreexternal
 
 Core tests cover runtime/API identity, canonical factories, environment aliases,
 dump selection, replay filename parsing, stream filtering, calibration, and
@@ -24,7 +33,11 @@ above 128 MiB. ``PYLIBF3_HARDWARE_SOAK_FRAMES`` and
 ``PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB`` can raise those release-gate thresholds
 for longer local qualification runs.
 
-Stable publication requires both repositories to be tagged ``v0.3.0``. Each
+Stable publication requires this repository to be tagged ``v1.0.0`` while the
+core remains coordinated at ``v0.3.0``. Each
 repaired wheel is installed in a clean environment and inspected with
 ``otool``/delocate or ``ldd``/auditwheel. Only bundled project dependencies and
-platform-provided libraries may remain.
+platform-provided libraries may remain. Releases use ``uv build``, provenance
+attestation through ``actions/attest``, and Trusted Publishing through
+``uv publish``. The GitHub provenance step is separate because uv does not
+currently generate PEP 740 attestations.

@@ -11,10 +11,6 @@ Capture, replay, and registration
    pylibfreenect3.RecordingWriter
    pylibfreenect3.RecordingStats
    pylibfreenect3.RecordingBundle
-   pylibfreenect3.Freenect2
-   pylibfreenect3.Freenect2Replay
-   pylibfreenect3.Device
-   pylibfreenect3.SyncFrameListener
    pylibfreenect3.Frame
    pylibfreenect3.FrameSet
    pylibfreenect3.Registration
@@ -29,15 +25,19 @@ uncompiled or runtime-unusable backend raises ``BackendUnavailableError``.
 .. autosummary::
    :toctree: generated
 
-   pylibfreenect3.PacketPipeline
-   pylibfreenect3.CpuPacketPipeline
-   pylibfreenect3.MetalPacketPipeline
-   pylibfreenect3.OpenGLPacketPipeline
-   pylibfreenect3.OpenCLPacketPipeline
-   pylibfreenect3.OpenCLKdePacketPipeline
-   pylibfreenect3.CudaPacketPipeline
-   pylibfreenect3.CudaKdePacketPipeline
-   pylibfreenect3.DumpPacketPipeline
+   pylibfreenect3.lowlevel.Context
+   pylibfreenect3.lowlevel.ReplayContext
+   pylibfreenect3.lowlevel.Device
+   pylibfreenect3.lowlevel.FrameListener
+   pylibfreenect3.lowlevel.PacketPipeline
+   pylibfreenect3.lowlevel.CpuPacketPipeline
+   pylibfreenect3.lowlevel.MetalPacketPipeline
+   pylibfreenect3.lowlevel.OpenGLPacketPipeline
+   pylibfreenect3.lowlevel.OpenCLPacketPipeline
+   pylibfreenect3.lowlevel.OpenCLKdePacketPipeline
+   pylibfreenect3.lowlevel.CudaPacketPipeline
+   pylibfreenect3.lowlevel.CudaKdePacketPipeline
+   pylibfreenect3.lowlevel.DumpPacketPipeline
 
 Typed values
 ------------
@@ -47,6 +47,8 @@ Typed values
 
    pylibfreenect3.FrameType
    pylibfreenect3.FrameFormat
+   pylibfreenect3.Stream
+   pylibfreenect3.Pipeline
    pylibfreenect3.LoggerLevel
    pylibfreenect3.ColorSettingCommand
    pylibfreenect3.DeviceConfig
@@ -71,11 +73,8 @@ Core and logging queries
    pylibfreenect3.logger_level_name
    pylibfreenect3.set_global_log_level
 
-Stream names
-------------
-
-``STREAM_NAMES`` is the immutable mapping from public stream names to
-``FrameType`` values.
+``Stream`` and ``Pipeline`` are string enums. Canonical string values remain
+accepted at API boundaries and are normalized to their enum member.
 
 Exceptions
 ----------

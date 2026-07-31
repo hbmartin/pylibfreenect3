@@ -5,7 +5,6 @@ from cpython.ref cimport Py_INCREF
 from cython.operator cimport dereference as deref, preincrement as inc
 from libc.stdint cimport uint32_t
 from libc.string cimport memcpy, memset
-from libcpp cimport bool
 from libcpp.map cimport map
 from libcpp.string cimport string
 from libcpp.vector cimport vector

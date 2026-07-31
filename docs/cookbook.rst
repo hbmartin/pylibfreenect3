@@ -146,7 +146,7 @@ calibration automatically; arbitrary image files do not.
 Frame rate and slow consumers
 -----------------------------
 
-Use blocking ``capture()`` or ``SyncFrameListener.wait()`` and compare frame
+Use blocking ``capture()`` or ``lowlevel.FrameListener.wait()`` and compare frame
 ``sequence`` and ``timestamp`` values. Busy-polling ``has_new_frame()`` can make
 an application loop appear to run faster than the camera and wastes CPU.
 

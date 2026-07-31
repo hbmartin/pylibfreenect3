@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import inspect
 import os
 import warnings
 import weakref
+from dataclasses import FrozenInstanceError
 
 import numpy as np
 import pytest
@@ -15,10 +17,10 @@ from pylibfreenect3 import _native
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_native_resources_fail_fast_when_inherited_after_fork() -> None:
-    listener = f3.SyncFrameListener(f3.FrameType.COLOR)
-    context = f3.Freenect2()
-    pipeline = f3.CpuPacketPipeline()
-    replay = f3.Freenect2Replay()
+    listener = f3.lowlevel.FrameListener(f3.FrameType.COLOR)
+    context = f3.lowlevel.Context()
+    pipeline = f3.lowlevel.CpuPacketPipeline()
+    replay = f3.lowlevel.ReplayContext()
     device = replay.open_device(["missing_color_1_1.jpg"], pipeline=pipeline)
     native_frames = _native._testing_frame_set()
     frame = native_frames.get(int(f3.FrameType.DEPTH))
@@ -31,8 +33,8 @@ def test_native_resources_fail_fast_when_inherited_after_fork() -> None:
         os.close(read_fd)
         checks = {
             "context": context.enumerate_devices,
-            "device": lambda: device.is_closed,
-            "frame": lambda: frame.width,
+            "device": lambda: device.closed,
+            "frame": lambda native_frame=frame: native_frame.width,
             "frame set": lambda: native_frames.contains(int(f3.FrameType.DEPTH)),
             "listener": listener.has_new_frame,
             "pipeline": lambda: pipeline.consumed,
@@ -70,22 +72,43 @@ def test_runtime_identity_and_pipeline_queries() -> None:
     assert f3.core_version().startswith("0.3.")
     assert f3.core_api_version() == 3
     assert f3.core_build_revision()
-    assert f3.core_revision() == f3.core_build_revision()
     assert {"cpu", "dump"} <= f3.compiled_pipelines()
     assert f3.available_pipelines() <= f3.compiled_pipelines()
-    assert (f3.Freenect2.VENDOR_ID, f3.Freenect2.PRODUCT_ID) == (0x045E, 0x02D8)
+    assert (
+        f3.lowlevel.Context.VENDOR_ID,
+        f3.lowlevel.Context.PRODUCT_ID,
+    ) == (0x045E, 0x02D8)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "replacement"),
+    [
+        ("Freenect2", "lowlevel.Context"),
+        ("Freenect2Replay", "lowlevel.ReplayContext"),
+        ("SyncFrameListener", "lowlevel.FrameListener"),
+        ("Device", "lowlevel.Device"),
+        ("STREAM_NAMES", "Stream"),
+        ("core_revision", "core_build_revision"),
+    ],
+)
+def test_removed_top_level_symbols_have_actionable_errors(
+    symbol: str, replacement: str
+) -> None:
+    with pytest.raises(AttributeError, match=replacement):
+        getattr(f3, symbol)
+    assert symbol not in dir(f3)
 
 
 def test_backend_classes_are_importable_and_report_availability() -> None:
     classes = {
-        "cpu": f3.CpuPacketPipeline,
-        "metal": f3.MetalPacketPipeline,
-        "opengl": f3.OpenGLPacketPipeline,
-        "opencl": f3.OpenCLPacketPipeline,
-        "opencl_kde": f3.OpenCLKdePacketPipeline,
-        "cuda": f3.CudaPacketPipeline,
-        "cuda_kde": f3.CudaKdePacketPipeline,
-        "dump": f3.DumpPacketPipeline,
+        "cpu": f3.lowlevel.CpuPacketPipeline,
+        "metal": f3.lowlevel.MetalPacketPipeline,
+        "opengl": f3.lowlevel.OpenGLPacketPipeline,
+        "opencl": f3.lowlevel.OpenCLPacketPipeline,
+        "opencl_kde": f3.lowlevel.OpenCLKdePacketPipeline,
+        "cuda": f3.lowlevel.CudaPacketPipeline,
+        "cuda_kde": f3.lowlevel.CudaKdePacketPipeline,
+        "dump": f3.lowlevel.DumpPacketPipeline,
     }
     compiled = f3.compiled_pipelines()
     available = f3.available_pipelines()
@@ -101,12 +124,12 @@ def test_backend_classes_are_importable_and_report_availability() -> None:
 
 def test_dump_tables_reject_access_before_device_calibration() -> None:
     with pytest.raises(f3.DeviceStateError, match="not ready"):
-        f3.DumpPacketPipeline().depth_p0_tables()
+        f3.lowlevel.DumpPacketPipeline().depth_p0_tables()
 
 
 def test_pipeline_is_consumed_exactly_once() -> None:
-    pipeline = f3.CpuPacketPipeline()
-    replay = f3.Freenect2Replay()
+    pipeline = f3.lowlevel.CpuPacketPipeline()
+    replay = f3.lowlevel.ReplayContext()
     device = replay.open_device(["missing_color_1_1.jpg"], pipeline=pipeline)
     assert pipeline.consumed
     assert device.pipeline_name == "cpu"
@@ -115,9 +138,27 @@ def test_pipeline_is_consumed_exactly_once() -> None:
     device.close()
 
 
+def test_pipeline_enum_and_canonical_strings_are_normalized() -> None:
+    replay = f3.lowlevel.ReplayContext()
+    enum_device = replay.open_device(
+        ["missing_color_1_1.jpg"], pipeline=f3.Pipeline.CPU
+    )
+    assert enum_device.pipeline_name is f3.Pipeline.CPU
+    enum_device.close()
+
+    string_device = replay.open_device(["missing_color_2_2.jpg"], pipeline="CPU")
+    assert string_device.pipeline_name is f3.Pipeline.CPU
+    string_device.close()
+
+    with pytest.raises(ValueError, match="unknown pipeline"):
+        replay.open_device(["missing_color_3_3.jpg"], pipeline="not-a-pipeline")
+    with pytest.raises(ValueError, match="streams must contain"):
+        f3.Camera.open(streams=("not-a-stream",))
+
+
 def test_consumed_dump_pipeline_rejects_access_after_device_close() -> None:
-    pipeline = f3.DumpPacketPipeline()
-    device = f3.Freenect2Replay().open_device(
+    pipeline = f3.lowlevel.DumpPacketPipeline()
+    device = f3.lowlevel.ReplayContext().open_device(
         ["missing_color_1_1.jpg"], pipeline=pipeline
     )
     device.close()
@@ -126,7 +167,7 @@ def test_consumed_dump_pipeline_rejects_access_after_device_close() -> None:
 
 
 def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
-    replay = f3.Freenect2Replay()
+    replay = f3.lowlevel.ReplayContext()
     device = replay.open_device(["missing_color_1_1.jpg"], pipeline="cpu")
     color_params = f3.ColorCameraParams(fx=100.0, fy=101.0, cx=2.0, cy=3.0)
     ir_params = f3.IrCameraParams(fx=200.0, fy=201.0, cx=4.0, cy=5.0)
@@ -150,7 +191,7 @@ def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
             device.set_color_setting(
                 f3.ColorSettingCommand.SET_INTEGRATION_TIME, invalid_type
             )
-    listener = f3.SyncFrameListener(f3.FrameType.COLOR)
+    listener = f3.lowlevel.FrameListener(f3.FrameType.COLOR)
     device.set_color_listener(listener)
     device.start(rgb=True, depth=False)
     assert device.get_color_setting(f3.ColorSettingCommand.GET_INTEGRATION_TIME) == 0
@@ -165,7 +206,7 @@ def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
     device.stop()
     device.close()
     device.close()
-    assert device.is_closed
+    assert device.closed
     with pytest.raises(f3.DeviceStateError):
         _ = device.serial_number
     with pytest.raises(f3.DeviceStateError):
@@ -174,7 +215,9 @@ def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
 
 def test_depth_replay_requires_calibration() -> None:
     with pytest.raises(f3.ReplayError, match="calibration"):
-        f3.Freenect2Replay().open_device(["depth_packet_1_1.depth"], pipeline="cpu")
+        f3.lowlevel.ReplayContext().open_device(
+            ["depth_packet_1_1.depth"], pipeline="cpu"
+        )
 
 
 def test_logger_utilities_cover_every_level() -> None:
@@ -235,7 +278,34 @@ def test_frame_formats_and_numpy_source_lifetime(
     assert source_ref() is None
 
 
+def test_frame_numpy_protocol_honors_dtype_and_copy() -> None:
+    source = np.arange(4, dtype=np.float32).reshape(2, 2)
+    frame = f3.Frame.from_array(source, frame_type=f3.FrameType.DEPTH)
+    assert frame.frame_type is f3.FrameType.DEPTH
+
+    view = np.asarray(frame)
+    assert np.shares_memory(view, source)
+    converted = np.asarray(frame, dtype=np.float64)
+    assert converted.dtype == np.float64
+    assert not np.shares_memory(converted, source)
+    copied = np.array(frame, copy=True)
+    assert not np.shares_memory(copied, source)
+    with pytest.raises(ValueError, match="dtype conversion"):
+        frame.__array__(np.dtype(np.float64), copy=False)
+
+
 def test_mismatched_array_layouts_are_rejected() -> None:
+    with pytest.raises(ValueError, match="dimensions"):
+        f3.Frame.allocate(0, 2, 4)
+    with pytest.raises(ValueError, match="FLOAT frames require 4"):
+        f3.Frame.allocate(2, 2, 1, frame_format=f3.FrameFormat.FLOAT)
+    with pytest.raises(ValueError, match="exactly one FrameType"):
+        f3.Frame.allocate(
+            2,
+            2,
+            4,
+            frame_type=f3.FrameType.COLOR | f3.FrameType.DEPTH,
+        )
     with pytest.raises(ValueError, match="array layout does not match FLOAT"):
         f3.Frame.from_array(
             np.zeros((2, 2), np.uint8), frame_format=f3.FrameFormat.FLOAT
@@ -292,14 +362,11 @@ def test_native_frame_set_release_stress(copy: bool) -> None:
     gc.collect()
 
 
-def test_frame_set_composite_and_unknown_keys_are_missing() -> None:
-    assert f3.STREAM_NAMES == {
-        "color": f3.FrameType.COLOR,
-        "ir": f3.FrameType.IR,
-        "depth": f3.FrameType.DEPTH,
-    }
-    with pytest.raises(TypeError):
-        f3.STREAM_NAMES["other"] = f3.FrameType.COLOR  # type: ignore[index]
+def test_frame_set_mapping_and_unknown_keys_are_missing() -> None:
+    from collections.abc import Mapping
+
+    assert issubclass(f3.FrameSet, Mapping)
+    assert tuple(f3.Stream) == (f3.Stream.COLOR, f3.Stream.IR, f3.Stream.DEPTH)
     frames = f3.FrameSet(native=_native._testing_frame_set())
     assert f3.FrameType.COLOR | f3.FrameType.DEPTH not in frames
     assert 8 not in frames
@@ -361,6 +428,10 @@ def test_typed_values_validate_inputs() -> None:
         f3.DeviceConfig(min_depth=2.0, max_depth=1.0)
     with pytest.raises(ValueError, match="IR camera parameters must be finite"):
         f3.IrCameraParams(fx=float("nan"))
+    with pytest.raises(TypeError, match="bool values"):
+        f3.DeviceConfig(enable_bilateral_filter=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="IR focal lengths must be non-negative"):
+        f3.IrCameraParams(fx=-1.0)
     with pytest.raises(ValueError, match="color focal lengths must be non-negative"):
         f3.ColorCameraParams(fy=-1.0)
     with pytest.raises(ValueError, match="reserved must be zero"):
@@ -368,12 +439,29 @@ def test_typed_values_validate_inputs() -> None:
     assert [value.value for value in f3.FrameType] == [1, 2, 4]
     assert [value.value for value in f3.FrameFormat] == [0, 1, 2, 4, 5, 6]
     assert [value.value for value in f3.LoggerLevel] == [0, 1, 2, 3, 4]
+    assert f3.Pipeline("opencl_kde") is f3.Pipeline.OPENCL_KDE
+    assert f3.Stream("depth") is f3.Stream.DEPTH
     assert [value.value for value in f3.ColorSettingCommand] == [
         0,
         1,
         2,
         *range(10, 84),
     ]
+
+
+def test_value_objects_are_immutable_and_capture_defaults_to_two_seconds() -> None:
+    config = f3.DeviceConfig()
+    with pytest.raises(FrozenInstanceError):
+        config.max_depth = 9.0  # type: ignore[misc]
+
+    capture_timeout = inspect.signature(f3.Camera.capture).parameters["timeout"]
+    frames_timeout = inspect.signature(f3.Camera.frames).parameters["timeout"]
+    lowlevel_timeout = inspect.signature(f3.lowlevel.FrameListener.wait).parameters[
+        "timeout"
+    ]
+    assert capture_timeout.default == 2.0
+    assert frames_timeout.default == 2.0
+    assert lowlevel_timeout.default is None
 
 
 def test_registration_overloads_with_synthetic_frames() -> None:

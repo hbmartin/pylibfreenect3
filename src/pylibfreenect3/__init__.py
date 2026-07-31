@@ -1,35 +1,22 @@
 from importlib.metadata import PackageNotFoundError, version
+from typing import NoReturn
 
 try:
     __version__ = version("pylibfreenect3")
 except PackageNotFoundError:
-    __version__ = "0.3.0.dev0"
+    __version__ = "1.0.0.dev0"
 
+from . import lowlevel
 from .api import (
-    STREAM_NAMES,
     Camera,
-    CpuPacketPipeline,
-    CudaKdePacketPipeline,
-    CudaPacketPipeline,
-    Device,
-    DumpPacketPipeline,
     Frame,
     FrameSet,
-    Freenect2,
-    Freenect2Replay,
-    MetalPacketPipeline,
-    OpenCLKdePacketPipeline,
-    OpenCLPacketPipeline,
-    OpenGLPacketPipeline,
-    PacketPipeline,
     Registration,
     RegistrationResult,
-    SyncFrameListener,
     available_pipelines,
     compiled_pipelines,
     core_api_version,
     core_build_revision,
-    core_revision,
     core_version,
     default_logger_level,
     global_logger_level,
@@ -55,39 +42,29 @@ from .types import (
     IrCameraParams,
     LedSettings,
     LoggerLevel,
+    Pipeline,
     ReplayCalibration,
+    Stream,
 )
 
 __all__ = [
-    "STREAM_NAMES",
     "BackendUnavailableError",
     "Camera",
     "ColorCameraParams",
     "ColorSettingCommand",
-    "CpuPacketPipeline",
-    "CudaKdePacketPipeline",
-    "CudaPacketPipeline",
-    "Device",
     "DeviceConfig",
     "DeviceOpenError",
     "DeviceStateError",
-    "DumpPacketPipeline",
     "Frame",
     "FrameFormat",
     "FrameSet",
     "FrameTimeoutError",
     "FrameType",
-    "Freenect2",
-    "Freenect2Replay",
     "FreenectError",
     "IrCameraParams",
     "LedSettings",
     "LoggerLevel",
-    "MetalPacketPipeline",
-    "OpenCLKdePacketPipeline",
-    "OpenCLPacketPipeline",
-    "OpenGLPacketPipeline",
-    "PacketPipeline",
+    "Pipeline",
     "RecordingBundle",
     "RecordingFormatError",
     "RecordingStats",
@@ -96,15 +73,46 @@ __all__ = [
     "RegistrationResult",
     "ReplayCalibration",
     "ReplayError",
-    "SyncFrameListener",
+    "Stream",
     "available_pipelines",
     "compiled_pipelines",
     "core_api_version",
     "core_build_revision",
-    "core_revision",
     "core_version",
     "default_logger_level",
     "global_logger_level",
     "logger_level_name",
+    "lowlevel",
     "set_global_log_level",
 ]
+
+_MOVED_SYMBOLS = {
+    "Freenect2": "pylibfreenect3.lowlevel.Context",
+    "Freenect2Replay": "pylibfreenect3.lowlevel.ReplayContext",
+    "SyncFrameListener": "pylibfreenect3.lowlevel.FrameListener",
+    "Device": "pylibfreenect3.lowlevel.Device",
+    "PacketPipeline": "pylibfreenect3.lowlevel.PacketPipeline",
+    "CpuPacketPipeline": "pylibfreenect3.lowlevel.CpuPacketPipeline",
+    "MetalPacketPipeline": "pylibfreenect3.lowlevel.MetalPacketPipeline",
+    "OpenGLPacketPipeline": "pylibfreenect3.lowlevel.OpenGLPacketPipeline",
+    "OpenCLPacketPipeline": "pylibfreenect3.lowlevel.OpenCLPacketPipeline",
+    "OpenCLKdePacketPipeline": "pylibfreenect3.lowlevel.OpenCLKdePacketPipeline",
+    "CudaPacketPipeline": "pylibfreenect3.lowlevel.CudaPacketPipeline",
+    "CudaKdePacketPipeline": "pylibfreenect3.lowlevel.CudaKdePacketPipeline",
+    "DumpPacketPipeline": "pylibfreenect3.lowlevel.DumpPacketPipeline",
+    "STREAM_NAMES": "pylibfreenect3.Stream",
+    "core_revision": "pylibfreenect3.core_build_revision",
+}
+
+
+def __getattr__(name: str) -> NoReturn:
+    replacement = _MOVED_SYMBOLS.get(name)
+    if replacement is not None:
+        raise AttributeError(
+            f"pylibfreenect3.{name} was removed in 1.0; use {replacement} instead"
+        )
+    raise AttributeError(f"module 'pylibfreenect3' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
