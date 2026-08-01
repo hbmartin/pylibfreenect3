@@ -13,6 +13,7 @@ import numpy.typing as npt
 from . import _native
 from .errors import DeviceOpenError, DeviceStateError, ReplayError
 from .types import (
+    _TIMESTAMP_TICK_SECONDS,
     AlignmentConfig,
     AlignmentStats,
     ColorCameraParams,
@@ -577,7 +578,7 @@ class FrameSet(Mapping[FrameType, Frame]):
     def alignment_delta_seconds(self) -> float | None:
         if self._alignment_delta_ticks is None:
             return None
-        return self._alignment_delta_ticks * 0.000125
+        return self._alignment_delta_ticks * _TIMESTAMP_TICK_SECONDS
 
 
 class FrameListener:

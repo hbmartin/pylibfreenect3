@@ -223,6 +223,31 @@ def test_replay_lifecycle_is_repeatable_and_access_after_close_fails() -> None:
         device.__enter__()
 
 
+def test_native_device_rejects_non_native_listener_addresses() -> None:
+    class FakeListener:
+        _listener_address = 1
+
+    device = f3.lowlevel.ReplayContext().open_device(
+        ["missing_color_1_1.jpg"], pipeline="cpu"
+    )
+    try:
+        with pytest.raises(TypeError, match="native frame listener"):
+            device._native.set_color_listener(FakeListener())
+        with pytest.raises(TypeError, match="native frame listener"):
+            device._native.set_depth_listener(FakeListener())
+
+        sync = f3.lowlevel.FrameListener(f3.FrameType.COLOR | f3.FrameType.DEPTH)
+        aligned = f3.lowlevel.AlignedFrameListener(
+            f3.FrameType.COLOR | f3.FrameType.DEPTH,
+            f3.AlignmentConfig(max_delta=0.025),
+        )
+        for listener in (sync, aligned):
+            device.set_color_listener(listener)
+            device.set_depth_listener(listener)
+    finally:
+        device.close()
+
+
 def test_depth_replay_requires_calibration() -> None:
     with pytest.raises(f3.ReplayError, match="calibration"):
         f3.lowlevel.ReplayContext().open_device(
@@ -580,6 +605,8 @@ def test_arrival_timestamp_color_conversion_and_detached_copy() -> None:
     readonly.flags.writeable = False
     with pytest.raises(ValueError, match="writable"):
         frame.to_color(out=readonly)
+    with pytest.raises(TypeError, match="NumPy array"):
+        frame._native.to_color([[[np.uint8(0), np.uint8(0), np.uint8(0)]]], 0)
 
     frames = f3.FrameSet(_native._testing_frame_set())
     copied = frames.detached_copy()
@@ -615,7 +642,39 @@ def test_timestamp_aligned_listener_wraparound_and_stats() -> None:
     with listener.wait(0) as frames:
         assert frames.alignment_delta_ticks == 4
         assert frames.alignment_delta_seconds == 0.0005
-    assert listener.alignment_stats == f3.AlignmentStats(1, 0, 4, 4)
+    stats = listener.alignment_stats
+    assert stats == f3.AlignmentStats(1, 0, 4, 4)
+    assert stats.last_delta_seconds == 0.0005
+    assert stats.maximum_delta_seconds == 0.0005
+    assert stats.last_delta_milliseconds == 0.5
+    assert stats.maximum_delta_milliseconds == 0.5
+
+
+def test_testing_push_copies_array_backed_frames_into_native_storage() -> None:
+    listener = _native.NativeAlignedFrameListener(int(f3.FrameType.COLOR), 8, 8)
+    source = np.array([[[30, 20, 10, 0]]], dtype=np.uint8)
+    source_ref = weakref.ref(source)
+    frame = _native.NativeFrame.from_array(
+        source,
+        int(f3.FrameType.COLOR),
+        int(f3.FrameFormat.BGRX),
+    )
+    assert listener._testing_push(int(f3.FrameType.COLOR), frame)
+
+    source[:] = 255
+    frames = listener.wait(0)
+    queued = frames.get(int(f3.FrameType.COLOR))
+    assert queued.to_numpy(copy=True).tolist() == [[[30, 20, 10, 0]]]
+
+    del source, frame
+    gc.collect()
+    assert source_ref() is None
+    assert queued.to_numpy(copy=True).tolist() == [[[30, 20, 10, 0]]]
+
+    frames.release()
+    del queued
+    gc.collect()
+    assert frames.release_complete
 
 
 def test_registration_workspace_maps_batch_and_lifting() -> None:

@@ -9,7 +9,9 @@ from collections.abc import Sequence
 import numpy as np
 import numpy.typing as npt
 
-from pylibfreenect3 import AlignmentConfig, Camera, Pipeline
+from pylibfreenect3 import AlignmentConfig, Camera, FrameTimeoutError, Pipeline
+
+_MAX_CONSECUTIVE_TIMEOUTS = 3
 
 
 def normalize_depth_for_display(
@@ -61,21 +63,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         queue_capacity=arguments.queue_capacity,
     )
     bgr = np.empty((1080, 1920, 3), dtype=np.uint8)
-    with Camera.open(
-        device=arguments.device,
-        pipeline=arguments.pipeline,
-        alignment=alignment,
-    ) as camera:
-        while True:
-            with camera.capture(timeout=arguments.timeout) as frames:
-                frames.color.to_color(out=bgr)
-                depth_view = normalize_depth_for_display(frames.depth.to_numpy())
-                depth_view = cv2.applyColorMap(depth_view, cv2.COLORMAP_TURBO)
-                cv2.imshow("Kinect v2 color", cv2.resize(bgr, (960, 540)))
-                cv2.imshow("Kinect v2 depth", depth_view)
-            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
-                break
-    cv2.destroyAllWindows()
+    timeout_count = 0
+    try:
+        with Camera.open(
+            device=arguments.device,
+            pipeline=arguments.pipeline,
+            alignment=alignment,
+        ) as camera:
+            while True:
+                try:
+                    with camera.capture(timeout=arguments.timeout) as frames:
+                        frames.color.to_color(out=bgr)
+                        depth_view = normalize_depth_for_display(
+                            frames.depth.to_numpy()
+                        )
+                        depth_view = cv2.applyColorMap(depth_view, cv2.COLORMAP_TURBO)
+                        cv2.imshow("Kinect v2 color", cv2.resize(bgr, (960, 540)))
+                        cv2.imshow("Kinect v2 depth", depth_view)
+                    timeout_count = 0
+                except FrameTimeoutError:
+                    timeout_count += 1
+                    if timeout_count >= _MAX_CONSECUTIVE_TIMEOUTS:
+                        raise RuntimeError(
+                            f"no frames received after {timeout_count} timeouts; "
+                            "check the Kinect connection"
+                        ) from None
+                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                    break
+    finally:
+        cv2.destroyAllWindows()
     return 0
 
 

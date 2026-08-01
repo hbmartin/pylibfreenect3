@@ -439,7 +439,7 @@ newer. The core headers and runtime must both be version 0.3.x with API 3.
 ## Development
 
 Point the build at a compatible core and synchronize the locked development
-environment. The project supports uv 0.11.x.
+environment. The project supports uv 0.12.x.
 
 ```console
 export Freenect2_ROOT=/opt/libfreenect2-metal

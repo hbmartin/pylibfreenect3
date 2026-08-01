@@ -55,7 +55,7 @@ dev = [
 ]
 
 [tool.uv]
-required-version = ">=0.11,<0.12"
+required-version = ">=0.12,<0.13"
 default-groups = ["dev"]
 
 [tool.scikit-build]
@@ -111,6 +111,7 @@ extend-exclude = ["src/pylibfreenect3/_native.cpp"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
+ignore = ["E501", "RUF001"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B018"]

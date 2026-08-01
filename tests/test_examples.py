@@ -7,6 +7,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
 DEMO_DIRECTORY = PROJECT_DIRECTORY / "examples" / "mediapipe_pose"
@@ -14,6 +15,8 @@ sys.path.insert(0, str(DEMO_DIRECTORY))
 sys.path.insert(0, str(PROJECT_DIRECTORY / "examples"))
 
 import numpy as np  # noqa: E402
+import opencv_viewer  # noqa: E402
+import pytest  # noqa: E402
 from opencv_viewer import normalize_depth_for_display  # noqa: E402
 from pose_demo import video_timestamp_ms  # noqa: E402
 from pose_math import (  # noqa: E402
@@ -140,6 +143,55 @@ class ExampleInteropTests(unittest.TestCase):
     def test_video_timestamp_uses_arrival_time_and_is_strictly_increasing(self) -> None:
         self.assertEqual(video_timestamp_ms(1_234_999, -1), 1234)
         self.assertEqual(video_timestamp_ms(1_234_999, 1234), 1235)
+
+    def test_opencv_viewer_allows_quit_after_capture_timeout(self) -> None:
+        class TimeoutCamera:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def capture(self, *, timeout):
+                raise opencv_viewer.FrameTimeoutError
+
+        cv2 = Mock()
+        cv2.waitKey.return_value = ord("q")
+        with (
+            patch.dict(sys.modules, {"cv2": cv2}),
+            patch.object(opencv_viewer.Camera, "open", return_value=TimeoutCamera()),
+        ):
+            self.assertEqual(opencv_viewer.main([]), 0)
+
+        cv2.waitKey.assert_called_once_with(1)
+        cv2.destroyAllWindows.assert_called_once_with()
+
+    def test_opencv_viewer_stops_after_repeated_timeouts_and_cleans_up(self) -> None:
+        class TimeoutCamera:
+            calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def capture(self, *, timeout):
+                self.calls += 1
+                raise opencv_viewer.FrameTimeoutError
+
+        camera = TimeoutCamera()
+        cv2 = Mock()
+        cv2.waitKey.return_value = -1
+        with (
+            patch.dict(sys.modules, {"cv2": cv2}),
+            patch.object(opencv_viewer.Camera, "open", return_value=camera),
+            pytest.raises(RuntimeError, match="after 3 timeouts"),
+        ):
+            opencv_viewer.main([])
+
+        self.assertEqual(camera.calls, 3)
+        cv2.destroyAllWindows.assert_called_once_with()
 
 
 if __name__ == "__main__":

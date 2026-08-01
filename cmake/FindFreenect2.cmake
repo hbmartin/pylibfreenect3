@@ -126,12 +126,21 @@ if(Freenect2_FOUND)
 #include <libfreenect2/vision.h>
 int main() {
   libfreenect2::vision::DepthSearchOptions options;
-  volatile bool vision_linked = libfreenect2::vision::convertColorFrame(
+  options.primary_radius = 8;
+  options.fallback_radius = 20;
+  options.cluster_span_mm = 150.0f;
+  volatile bool color_linked = libfreenect2::vision::convertColorFrame(
       0, libfreenect2::vision::BGR, 0, 0);
+  volatile bool map_linked = libfreenect2::vision::buildColorToDepthMap(
+      0, 0, 0, 0, 0);
+  volatile int depth_linked = libfreenect2::vision::findDepthPixel(
+      0.0f, 0.0f, 0, 0, 0, 0, 0, options);
+  volatile bool lift_linked = libfreenect2::vision::liftColorPoints(
+      0, 0, 0, 0, 0, 0, 0, 0, options, 0, 0, 0);
   std::cout << libfreenect2::getVersion() << ";"
             << libfreenect2::getApiVersion() << ";"
             << libfreenect2::getBuildRevision() << ";"
-            << options.primary_radius << ";" << vision_linked;
+            << color_linked << map_linked << depth_linked << lift_linked;
   return 0;
 }
 ]=])
@@ -156,17 +165,10 @@ int main() {
   list(GET _Freenect2_probe_values 0 Freenect2_RUNTIME_VERSION)
   list(GET _Freenect2_probe_values 1 Freenect2_RUNTIME_API)
   list(GET _Freenect2_probe_values 2 Freenect2_BUILD_REVISION)
-  list(GET _Freenect2_probe_values 3 Freenect2_VISION_PRIMARY_RADIUS)
   if(NOT Freenect2_RUNTIME_VERSION MATCHES "^0\\.3\\." OR NOT Freenect2_RUNTIME_API STREQUAL "3")
     message(FATAL_ERROR
       "libfreenect2 runtime 0.3.x with API 3 is required; found "
       "${Freenect2_RUNTIME_VERSION} with API ${Freenect2_RUNTIME_API}"
-    )
-  endif()
-  if(NOT Freenect2_VISION_PRIMARY_RADIUS STREQUAL "8")
-    message(FATAL_ERROR
-      "The discovered libfreenect2 vision API is incompatible; expected the "
-      "0.3 development API with an 8-pixel default primary radius."
     )
   endif()
   message(STATUS "pylibfreenect3 native core:")

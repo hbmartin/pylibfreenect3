@@ -34,6 +34,7 @@ __all__ = [
 DEPTH_TABLE_SIZE = 512 * 424
 DEPTH_LOOKUP_TABLE_SIZE = 2048
 P0_TABLES_BYTE_LENGTH = 32 + 3 * (2 + DEPTH_TABLE_SIZE * 2 + 2)
+_TIMESTAMP_TICK_SECONDS = 0.000125
 
 
 class FrameType(IntFlag):
@@ -107,7 +108,7 @@ class AlignmentConfig:
     def __post_init__(self) -> None:
         if not isfinite(self.max_delta) or self.max_delta < 0:
             raise ValueError("max_delta must be finite and non-negative")
-        if self.max_delta > 0xFFFFFFFF * 0.000125:
+        if self.max_delta > 0xFFFFFFFF * _TIMESTAMP_TICK_SECONDS:
             raise ValueError("max_delta exceeds the native timestamp range")
         if (
             not isinstance(self.queue_capacity, int)
@@ -118,7 +119,7 @@ class AlignmentConfig:
 
     @property
     def max_delta_ticks(self) -> int:
-        return round(self.max_delta / 0.000125)
+        return round(self.max_delta / _TIMESTAMP_TICK_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,19 +131,19 @@ class AlignmentStats:
 
     @property
     def last_delta_seconds(self) -> float:
-        return self.last_delta_ticks * 0.000125
+        return self.last_delta_ticks * _TIMESTAMP_TICK_SECONDS
 
     @property
     def maximum_delta_seconds(self) -> float:
-        return self.maximum_delta_ticks * 0.000125
+        return self.maximum_delta_ticks * _TIMESTAMP_TICK_SECONDS
 
     @property
     def last_delta_milliseconds(self) -> float:
-        return self.last_delta_ticks * 0.125
+        return self.last_delta_seconds * 1000.0
 
     @property
     def maximum_delta_milliseconds(self) -> float:
-        return self.maximum_delta_ticks * 0.125
+        return self.maximum_delta_seconds * 1000.0
 
 
 @dataclass(frozen=True, slots=True)

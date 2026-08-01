@@ -23,7 +23,7 @@ lookups.
 
 Use `Camera.frames()` for synchronous iteration and `Camera.open_recording`
 for schema-v1 bundles. Async capture and decoder-thread Python callbacks are
-not part of 0.3.
+not part of pylibfreenect3 1.0.
 
 Timestamp alignment is opt-in. Omitting `alignment` preserves the legacy
 arrival-based pairing behavior and makes `FrameSet.alignment_delta_ticks` and

@@ -6,10 +6,7 @@ on:
       - master
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: pages
@@ -17,6 +14,13 @@ concurrency:
 
 jobs:
   deploy:
+    permissions:
+      # Required by actions/checkout to read the repository contents.
+      contents: read
+      # Required to publish the built site to GitHub Pages.
+      pages: write
+      # Required to mint the OIDC token used by actions/deploy-pages.
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -32,7 +36,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          version: 0.11.30
+          version: 0.12.0
           enable-cache: true
       - name: Install docs dependencies
         run: uv sync --only-group docs --no-install-project --locked
