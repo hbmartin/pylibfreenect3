@@ -11,7 +11,12 @@ import numpy as np
 import numpy.typing as npt
 
 from . import _native
-from .errors import DeviceOpenError, DeviceStateError, ReplayError
+from .errors import (
+    DeviceOpenError,
+    DeviceStateError,
+    ReplayError,
+    WorkspaceStateError,
+)
 from .types import (
     _TIMESTAMP_TICK_SECONDS,
     AlignmentConfig,
@@ -30,7 +35,6 @@ from .types import (
     PacketPipelineConfig,
     Pipeline,
     ReplayCalibration,
-    RgbDecoder,
     Stream,
     _dataclass_from_mapping,
 )
@@ -129,13 +133,7 @@ class PacketPipeline:
         config: PacketPipelineConfig | None = None,
     ) -> None:
         selected = PacketPipelineConfig() if config is None else config
-        decoder = {
-            RgbDecoder.AUTO: 0,
-            RgbDecoder.TURBOJPEG: 1,
-            RgbDecoder.VIDEOTOOLBOX: 2,
-            RgbDecoder.VAAPI: 3,
-            RgbDecoder.TEGRAJPEG: 4,
-        }[selected.rgb_decoder]
+        decoder = _native.RGB_DECODER_VALUES[selected.rgb_decoder.value]
         self.config = selected
         self._native = _native.NativePipeline(
             self.name.value,
@@ -218,6 +216,8 @@ def _coerce_pipeline(
     config: PacketPipelineConfig | None = None,
 ) -> PacketPipeline | None:
     if value is None:
+        if config is not None:
+            raise ValueError("pipeline_config cannot be supplied without a pipeline")
         return None
     if isinstance(value, PacketPipeline):
         if config is not None:
@@ -598,6 +598,14 @@ class FrameListener:
 
 
 class AlignedFrameListener:
+    """Deliver frame sets whose device timestamps agree within ``max_delta``.
+
+    The listener is designed for a single consuming thread. With concurrent
+    ``wait()`` callers, ``FrameSet.alignment_delta_ticks`` and
+    ``alignment_stats`` reflect the most recent delivery, which may belong to
+    a set consumed by another thread.
+    """
+
     def __init__(
         self,
         frame_types: FrameType,
@@ -1104,9 +1112,9 @@ class RegistrationWorkspace:
         options: DepthSearchOptions = _DEFAULT_DEPTH_SEARCH_OPTIONS,
     ) -> LandmarkLiftResult:
         if not self._has_applied:
-            raise DeviceStateError("registration workspace has not been applied")
+            raise WorkspaceStateError("registration workspace has not been applied")
         if self.color_to_depth_map is None:
-            raise DeviceStateError(
+            raise WorkspaceStateError(
                 "workspace was created without include_color_to_depth_map=True"
             )
         values = np.asarray(xy)

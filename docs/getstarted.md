@@ -28,7 +28,10 @@ not part of pylibfreenect3 1.0.
 Timestamp alignment is opt-in. Omitting `alignment` preserves the legacy
 arrival-based pairing behavior and makes `FrameSet.alignment_delta_ticks` and
 `Camera.alignment_stats` return `None`. Vision examples explicitly use a 25 ms
-threshold and bounded queues of eight frames per stream.
+threshold and bounded queues of eight frames per stream. An aligned listener
+expects a single consuming thread; with concurrent waiters the reported
+per-set delta and statistics reflect the most recent delivery, which may
+belong to another thread's frame set.
 
 ## Processes and threads
 

@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Final
 
 import numpy as np
 import numpy.typing as npt
@@ -12,6 +13,8 @@ from .types import (
 )
 
 type _FrameArray = npt.NDArray[np.uint8] | npt.NDArray[np.float32]
+
+RGB_DECODER_VALUES: Final[dict[str, int]]
 
 def core_version() -> str: ...
 def core_api_version() -> int: ...

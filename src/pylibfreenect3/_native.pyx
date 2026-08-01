@@ -29,6 +29,16 @@ cnp.import_array()
 
 cdef int _WAIT_SLICE_MS = 100
 
+# Keyed by RgbDecoder values; sourced from the native enum so the Python
+# layer cannot drift from the core's PacketPipelineConfig ordering.
+RGB_DECODER_VALUES = {
+    "auto": <int>lf.RGB_DECODER_AUTO,
+    "turbojpeg": <int>lf.RGB_DECODER_TURBOJPEG,
+    "videotoolbox": <int>lf.RGB_DECODER_VIDEOTOOLBOX,
+    "vaapi": <int>lf.RGB_DECODER_VAAPI,
+    "tegrajpeg": <int>lf.RGB_DECODER_TEGRAJPEG,
+}
+
 
 cdef void _require_process(long owner_pid) except *:
     cdef long current_pid = c_getpid()

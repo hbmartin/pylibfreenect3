@@ -33,6 +33,7 @@ from .errors import (
     FreenectError,
     RecordingFormatError,
     ReplayError,
+    WorkspaceStateError,
 )
 from .recording import RecordingBundle, RecordingStats, RecordingWriter
 from .types import (
@@ -94,6 +95,7 @@ __all__ = [
     "ReplayError",
     "RgbDecoder",
     "Stream",
+    "WorkspaceStateError",
     "available_pipelines",
     "compiled_pipelines",
     "core_api_version",

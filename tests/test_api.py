@@ -695,7 +695,8 @@ def test_registration_workspace_maps_batch_and_lifting() -> None:
         include_depth_to_color_map=True,
         include_color_to_depth_map=True,
     )
-    with pytest.raises(f3.DeviceStateError, match="has not been applied"):
+    assert issubclass(f3.WorkspaceStateError, f3.FreenectError)
+    with pytest.raises(f3.WorkspaceStateError, match="has not been applied"):
         workspace.lift_normalized([[0.5, 0.5]])
 
     color = f3.Frame.from_array(
@@ -767,6 +768,11 @@ def test_registration_workspace_maps_batch_and_lifting() -> None:
             include_color_depth_map=False,
         )
 
+    plain = registration.workspace()
+    plain.apply(color, depth)
+    with pytest.raises(f3.WorkspaceStateError, match="include_color_to_depth_map"):
+        plain.lift_normalized([[0.5, 0.5]])
+
 
 def test_pipeline_config_device_diagnostics_and_calibration_matrices() -> None:
     config = f3.PacketPipelineConfig(
@@ -777,6 +783,13 @@ def test_pipeline_config_device_diagnostics_and_calibration_matrices() -> None:
         f3.lowlevel.ReplayContext().open_device(
             ["missing_color_1_1.jpg"], pipeline=pipeline, pipeline_config=config
         )
+    with pytest.raises(ValueError, match="without a pipeline"):
+        f3.lowlevel.ReplayContext().open_device(
+            ["missing_color_1_1.jpg"], pipeline=None, pipeline_config=config
+        )
+    with pytest.raises(ValueError, match="without a pipeline"):
+        f3.lowlevel.Context().open_device(pipeline=None, pipeline_config=config)
+    assert set(_native.RGB_DECODER_VALUES) == {member.value for member in f3.RgbDecoder}
     device = f3.lowlevel.ReplayContext().open_device(
         ["missing_color_1_1.jpg"], pipeline="cpu", pipeline_config=config
     )

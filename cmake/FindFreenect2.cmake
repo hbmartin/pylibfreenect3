@@ -129,18 +129,17 @@ int main() {
   options.primary_radius = 8;
   options.fallback_radius = 20;
   options.cluster_span_mm = 150.0f;
-  volatile bool color_linked = libfreenect2::vision::convertColorFrame(
-      0, libfreenect2::vision::BGR, 0, 0);
-  volatile bool map_linked = libfreenect2::vision::buildColorToDepthMap(
-      0, 0, 0, 0, 0);
-  volatile int depth_linked = libfreenect2::vision::findDepthPixel(
-      0.0f, 0.0f, 0, 0, 0, 0, 0, options);
-  volatile bool lift_linked = libfreenect2::vision::liftColorPoints(
-      0, 0, 0, 0, 0, 0, 0, 0, options, 0, 0, 0);
+  // Reference each vision entry point without calling it: the probe must
+  // prove declaration and linkage, not the core's null-argument behavior.
+  volatile auto color_fn = &libfreenect2::vision::convertColorFrame;
+  volatile auto map_fn = &libfreenect2::vision::buildColorToDepthMap;
+  volatile auto depth_fn = &libfreenect2::vision::findDepthPixel;
+  volatile auto lift_fn = &libfreenect2::vision::liftColorPoints;
+  volatile bool vision_linked = color_fn && map_fn && depth_fn && lift_fn;
   std::cout << libfreenect2::getVersion() << ";"
             << libfreenect2::getApiVersion() << ";"
             << libfreenect2::getBuildRevision() << ";"
-            << color_linked << map_linked << depth_linked << lift_linked;
+            << options.primary_radius << vision_linked;
   return 0;
 }
 ]=])
