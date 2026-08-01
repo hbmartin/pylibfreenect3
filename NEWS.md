@@ -25,8 +25,9 @@
   deprecated aliases. The alias covers attribute access only, so
   `RegistrationResult` can no longer be constructed with a `color_depth_map`
   keyword.
-- Adds `WorkspaceStateError` for using a `RegistrationWorkspace` before
-  `apply()` or without the reverse map it was configured for.
+- Adds `WorkspaceStateError`, a `DeviceStateError` subclass, for using a
+  `RegistrationWorkspace` before `apply()` or without the reverse map it was
+  configured for.
 
 ## 0.3.0
 
