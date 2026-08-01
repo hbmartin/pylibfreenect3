@@ -22,7 +22,11 @@
   eight.
 - Renames `include_color_depth_map` and `color_depth_map` to
   `include_depth_to_color_map` and `depth_to_color_map`; the old names warn as
-  deprecated aliases.
+  deprecated aliases. The alias covers attribute access only, so
+  `RegistrationResult` can no longer be constructed with a `color_depth_map`
+  keyword.
+- Adds `WorkspaceStateError` for using a `RegistrationWorkspace` before
+  `apply()` or without the reverse map it was configured for.
 
 ## 0.3.0
 

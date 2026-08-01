@@ -14,6 +14,10 @@ class DeviceStateError(FreenectError):
     """An operation is invalid for the current device/frame state."""
 
 
+class WorkspaceStateError(FreenectError):
+    """A registration workspace was used before the required apply() call."""
+
+
 class FrameTimeoutError(FreenectError, TimeoutError):
     """No synchronized frame set arrived before the timeout."""
 

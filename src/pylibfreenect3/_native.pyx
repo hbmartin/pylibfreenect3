@@ -29,6 +29,16 @@ cnp.import_array()
 
 cdef int _WAIT_SLICE_MS = 100
 
+# Keyed by RgbDecoder values; sourced from the native enum so the Python
+# layer cannot drift from the core's PacketPipelineConfig ordering.
+RGB_DECODER_VALUES = {
+    "auto": <int>lf.RGB_DECODER_AUTO,
+    "turbojpeg": <int>lf.RGB_DECODER_TURBOJPEG,
+    "videotoolbox": <int>lf.RGB_DECODER_VIDEOTOOLBOX,
+    "vaapi": <int>lf.RGB_DECODER_VAAPI,
+    "tegrajpeg": <int>lf.RGB_DECODER_TEGRAJPEG,
+}
+
 
 cdef void _require_process(long owner_pid) except *:
     cdef long current_pid = c_getpid()
@@ -455,7 +465,9 @@ cdef class NativeFrame:
 
     def to_color(self, object output, int order):
         self._check()
-        cdef cnp.ndarray destination = np.asarray(output)
+        if not isinstance(output, np.ndarray):
+            raise TypeError("output must be a NumPy array")
+        cdef cnp.ndarray destination = <cnp.ndarray>output
         cdef bint ok
         cdef unsigned char *destination_ptr
         cdef size_t destination_size
@@ -484,6 +496,24 @@ cdef NativeFrame _borrow_frame(lf.NativeFrame *ptr, int frame_type, NativeFrameS
     return result
 
 
+cdef lf.NativeFrame *_copy_frame(lf.NativeFrame *source) except NULL:
+    cdef lf.NativeFrame *result = new lf.NativeFrame(
+        source.width, source.height, source.bytes_per_pixel, NULL
+    )
+    cdef size_t data_size = source.width * source.height * source.bytes_per_pixel
+    if data_size:
+        memcpy(result.data, source.data, data_size)
+    result.timestamp = source.timestamp
+    result.arrival_timestamp_us = source.arrival_timestamp_us
+    result.sequence = source.sequence
+    result.exposure = source.exposure
+    result.gain = source.gain
+    result.gamma = source.gamma
+    result.status = source.status
+    result.format = source.format
+    return result
+
+
 cdef class NativeFrameSet:
     cdef map[lf.NativeFrameType, lf.NativeFrame *] frames
     cdef object listener
@@ -492,6 +522,7 @@ cdef class NativeFrameSet:
     cdef bint release_requested
     cdef bint released
     cdef bint owns_frames
+    cdef bint aligned_listener
     cdef long long alignment_delta_ticks
     cdef long owner_pid
 
@@ -502,6 +533,7 @@ cdef class NativeFrameSet:
         self.release_requested = False
         self.released = False
         self.owns_frames = False
+        self.aligned_listener = False
         self.alignment_delta_ticks = -1
         self.owner_pid = c_getpid()
 
@@ -509,12 +541,15 @@ cdef class NativeFrameSet:
         if (self.owner_pid == c_getpid() and self.filled and
                 not self.released):
             if self.listener is not None:
-                if isinstance(self.listener, NativeAlignedFrameListener):
-                    (<NativeAlignedFrameListener>self.listener)._release_native(self)
-                else:
-                    (<NativeSyncFrameListener>self.listener)._release_native(self)
+                self._release_via_listener()
             elif self.owns_frames:
                 self._release_owned()
+
+    cdef void _release_via_listener(self):
+        if self.aligned_listener:
+            (<NativeAlignedFrameListener>self.listener)._release_native(self)
+        else:
+            (<NativeSyncFrameListener>self.listener)._release_native(self)
 
     cdef void _release_owned(self):
         cdef map[lf.NativeFrameType, lf.NativeFrame *].iterator it = self.frames.begin()
@@ -535,10 +570,7 @@ cdef class NativeFrameSet:
     cdef void _maybe_release(self):
         if self.release_requested and self.borrow_count == 0 and not self.released:
             if self.listener is not None:
-                if isinstance(self.listener, NativeAlignedFrameListener):
-                    (<NativeAlignedFrameListener>self.listener)._release_native(self)
-                else:
-                    (<NativeSyncFrameListener>self.listener)._release_native(self)
+                self._release_via_listener()
             elif self.owns_frames:
                 self._release_owned()
             else:
@@ -703,6 +735,7 @@ cdef class NativeAlignedFrameListener:
         cdef int milliseconds
         cdef double seconds
         result.listener = self
+        result.aligned_listener = True
         if timeout is None:
             while True:
                 with nogil:
@@ -747,11 +780,26 @@ cdef class NativeAlignedFrameListener:
         frame._check()
         cdef bint accepted
         cdef lf.NativeFrameType native_type = _frame_type(frame_type)
-        with nogil:
-            accepted = self.ptr.onNewFrame(native_type, frame.ptr)
+        cdef lf.NativeFrame *submitted = frame.ptr
+        cdef lf.NativeFrame *copied = NULL
+        if frame.numpy_owner is not None:
+            copied = _copy_frame(frame.ptr)
+            submitted = copied
+        try:
+            with nogil:
+                accepted = self.ptr.onNewFrame(native_type, submitted)
+        except Exception:
+            if copied != NULL:
+                del copied
+            raise
         if accepted:
+            if copied != NULL:
+                del frame.ptr
+                frame.numpy_owner = None
             frame.ptr = NULL
             frame.owns_ptr = False
+        elif copied != NULL:
+            del copied
         return accepted != 0
 
     cdef void _release_native(self, NativeFrameSet frame_set):
@@ -760,6 +808,16 @@ cdef class NativeAlignedFrameListener:
             with nogil:
                 self.ptr.release(frame_set.frames)
             frame_set.released = True
+
+
+cdef lf.NativeFrameListener *_listener_pointer(object listener) except NULL:
+    if isinstance(listener, NativeSyncFrameListener):
+        _require_process((<NativeSyncFrameListener>listener).owner_pid)
+        return <lf.NativeFrameListener *>(<NativeSyncFrameListener>listener).ptr
+    if isinstance(listener, NativeAlignedFrameListener):
+        _require_process((<NativeAlignedFrameListener>listener).owner_pid)
+        return <lf.NativeFrameListener *>(<NativeAlignedFrameListener>listener).ptr
+    raise TypeError("listener must be a native frame listener")
 
 
 cdef class NativeDeviceHandle:
@@ -895,16 +953,16 @@ cdef class NativeDeviceHandle:
 
     def set_color_listener(self, listener not None):
         self._check_stopped()
-        cdef size_t listener_address = listener._listener_address
+        cdef lf.NativeFrameListener *listener_ptr = _listener_pointer(listener)
         with nogil:
-            self.ptr.setColorFrameListener(<lf.NativeFrameListener *>listener_address)
+            self.ptr.setColorFrameListener(listener_ptr)
         self.color_listener = listener
 
     def set_depth_listener(self, listener not None):
         self._check_stopped()
-        cdef size_t listener_address = listener._listener_address
+        cdef lf.NativeFrameListener *listener_ptr = _listener_pointer(listener)
         with nogil:
-            self.ptr.setIrAndDepthFrameListener(<lf.NativeFrameListener *>listener_address)
+            self.ptr.setIrAndDepthFrameListener(listener_ptr)
         self.depth_listener = listener
 
     def set_color_auto_exposure(self, float compensation=0.0):

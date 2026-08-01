@@ -29,6 +29,7 @@ from pylibfreenect3 import (
     AlignmentConfig,
     Camera,
     DepthSearchOptions,
+    Pipeline,
     Registration,
 )
 
@@ -131,11 +132,6 @@ def _optional_point(values: Sequence[float], enabled: bool) -> OptionalPoint3:
 
 def _serializable_point(point: OptionalPoint3) -> list[float] | None:
     return None if point is None else [round(float(value), 6) for value in point]
-
-
-def _empty_measurements() -> dict[str, Measurement]:
-    empty: list[OptionalPoint3] = [None] * len(LANDMARK_NAMES)
-    return compute_measurements(empty, empty)
 
 
 def _frame_record(frame: FrameInfo, pipeline: str) -> dict[str, Any]:
@@ -269,6 +265,7 @@ def _draw_3d_view(panel: Any, points: Sequence[OptionalPoint3], cv2: Any) -> Non
 
 def _render(
     rgb: Any,
+    *,
     image_landmarks: Sequence[Any],
     kinect_points: Sequence[OptionalPoint3],
     currently_measured: Sequence[bool],
@@ -416,7 +413,11 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--serial", default="", help="Kinect serial; defaults to the first device"
     )
-    parser.add_argument("--pipeline", choices=("auto", "metal", "cpu"), default="auto")
+    parser.add_argument(
+        "--pipeline",
+        choices=tuple(value.value for value in Pipeline if value is not Pipeline.DUMP),
+        default=Pipeline.AUTO.value,
+    )
     parser.add_argument(
         "--output", type=Path, default=Path("captures") / f"mediapipe_pose_{timestamp}"
     )
@@ -605,18 +606,18 @@ def main() -> int:
                 )
                 canvas = _render(
                     rgb_buffer,
-                    image_landmarks,
-                    smoothed_kinect,
-                    [point is not None for point in raw_kinect],
-                    confident,
-                    measurements,
-                    fps,
-                    frame,
-                    pipeline_name,
-                    recorder.active,
-                    False,
-                    cv2,
-                    np,
+                    image_landmarks=image_landmarks,
+                    kinect_points=smoothed_kinect,
+                    currently_measured=[point is not None for point in raw_kinect],
+                    confident=confident,
+                    measurements=measurements,
+                    fps=fps,
+                    frame=frame,
+                    pipeline=pipeline_name,
+                    recording=recorder.active,
+                    paused=False,
+                    cv2=cv2,
+                    np=np,
                 )
                 recorder.write(record)
                 last_canvas = canvas
@@ -632,18 +633,18 @@ def main() -> int:
                     paused = True
                     last_canvas = _render(
                         rgb_buffer,
-                        image_landmarks,
-                        smoothed_kinect,
-                        [point is not None for point in raw_kinect],
-                        confident,
-                        measurements,
-                        fps,
-                        frame,
-                        pipeline_name,
-                        recorder.active,
-                        True,
-                        cv2,
-                        np,
+                        image_landmarks=image_landmarks,
+                        kinect_points=smoothed_kinect,
+                        currently_measured=[point is not None for point in raw_kinect],
+                        confident=confident,
+                        measurements=measurements,
+                        fps=fps,
+                        frame=frame,
+                        pipeline=pipeline_name,
+                        recording=recorder.active,
+                        paused=True,
+                        cv2=cv2,
+                        np=np,
                     )
                 elif key == ord("r"):
                     recorder.toggle()
