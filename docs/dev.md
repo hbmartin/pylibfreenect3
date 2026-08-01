@@ -1,5 +1,8 @@
 # Development and release gates
 
+Repository owners should also follow the [maintainer guide](maintainers.md) for
+compatibility reviews, dependency updates, CI operation, and publication.
+
 Run hardware-free tests with:
 
 ```console

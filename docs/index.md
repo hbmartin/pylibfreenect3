@@ -14,6 +14,7 @@ checksummed recording and replay.
 - Use the [OpenCV and registration cookbook](cookbook.md) for image conversion,
   depth storage, registration, and slow-consumer guidance.
 - Browse the generated [API reference](api/index.md).
+- Maintain the project with the [maintainer guide](maintainers.md).
 
 Live capture requires a Kinect v2, its power/USB adapter, and a USB 3
 connection. Hardware is not required to use frame allocation, recording
