@@ -32,6 +32,7 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/hbmartin/pylibfreenect3"
+Documentation = "https://hbmartin.github.io/pylibfreenect3/"
 Issues = "https://github.com/hbmartin/pylibfreenect3/issues"
 
 [dependency-groups]
@@ -44,7 +45,7 @@ build = [
 test = ["pytest>=8.4,<9", "pytest-cov>=6.2,<8"]
 lint = ["ruff>=0.12,<0.16", "cython-lint>=0.16,<0.17"]
 types = ["mypy>=1.17,<2", "pyright>=1.1.403,<2"]
-docs = ["sphinx>=8.2,<10", "sphinx-rtd-theme>=3,<4"]
+docs = ["mkdocstrings-python>=2.0.5", "zensical>=0.0.47"]
 dev = [
   {include-group = "build"},
   {include-group = "test"},
@@ -113,6 +114,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B018"]
+"tests/test_examples.py" = ["PT009"]
+"examples/mediapipe_pose/*.py" = ["E501", "UP045"]
+"examples/mediapipe_pose/pose_demo.py" = ["B904", "RUF046", "SIM108"]
 
 [tool.mypy]
 python_version = "3.12"

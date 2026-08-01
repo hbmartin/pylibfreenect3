@@ -20,6 +20,10 @@ if(TARGET freenect2::freenect2)
       _Freenect2_configurations freenect2::freenect2 IMPORTED_CONFIGURATIONS
     )
     if(_Freenect2_configurations)
+      # Multi-config packages may list DEBUG first; the probe and RPATH
+      # should resolve to the release library whenever one is available.
+      list(REMOVE_ITEM _Freenect2_configurations RELEASE)
+      list(PREPEND _Freenect2_configurations RELEASE)
       foreach(_Freenect2_configuration IN LISTS _Freenect2_configurations)
         get_target_property(
           Freenect2_LIBRARY freenect2::freenect2
@@ -105,15 +109,29 @@ if(Freenect2_FOUND)
     message(FATAL_ERROR "libfreenect2 0.3.x headers are required; found '${Freenect2_VERSION}'")
   endif()
 
+  if(NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/vision.h")
+    message(FATAL_ERROR
+      "This pylibfreenect3 source requires a recent libfreenect2-metal 0.3 "
+      "development install containing libfreenect2/vision.h. Rebuild and "
+      "install libfreenect2-metal from the pinned revision, then set "
+      "Freenect2_ROOT to that prefix."
+    )
+  endif()
+
   get_filename_component(Freenect2_LIBRARY_DIR "${Freenect2_LIBRARY}" DIRECTORY)
   set(_Freenect2_probe "${CMAKE_CURRENT_BINARY_DIR}/freenect2_probe.cpp")
   file(WRITE "${_Freenect2_probe}" [=[
 #include <iostream>
 #include <libfreenect2/libfreenect2.hpp>
+#include <libfreenect2/vision.h>
 int main() {
+  libfreenect2::vision::DepthSearchOptions options;
+  volatile bool vision_linked = libfreenect2::vision::convertColorFrame(
+      0, libfreenect2::vision::BGR, 0, 0);
   std::cout << libfreenect2::getVersion() << ";"
             << libfreenect2::getApiVersion() << ";"
-            << libfreenect2::getBuildRevision();
+            << libfreenect2::getBuildRevision() << ";"
+            << options.primary_radius << ";" << vision_linked;
   return 0;
 }
 ]=])
@@ -138,10 +156,17 @@ int main() {
   list(GET _Freenect2_probe_values 0 Freenect2_RUNTIME_VERSION)
   list(GET _Freenect2_probe_values 1 Freenect2_RUNTIME_API)
   list(GET _Freenect2_probe_values 2 Freenect2_BUILD_REVISION)
+  list(GET _Freenect2_probe_values 3 Freenect2_VISION_PRIMARY_RADIUS)
   if(NOT Freenect2_RUNTIME_VERSION MATCHES "^0\\.3\\." OR NOT Freenect2_RUNTIME_API STREQUAL "3")
     message(FATAL_ERROR
       "libfreenect2 runtime 0.3.x with API 3 is required; found "
       "${Freenect2_RUNTIME_VERSION} with API ${Freenect2_RUNTIME_API}"
+    )
+  endif()
+  if(NOT Freenect2_VISION_PRIMARY_RADIUS STREQUAL "8")
+    message(FATAL_ERROR
+      "The discovered libfreenect2 vision API is incompatible; expected the "
+      "0.3 development API with an 8-pixel default primary radius."
     )
   endif()
   message(STATUS "pylibfreenect3 native core:")

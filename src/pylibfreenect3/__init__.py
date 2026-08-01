@@ -11,8 +11,10 @@ from .api import (
     Camera,
     Frame,
     FrameSet,
+    LandmarkLiftResult,
     Registration,
     RegistrationResult,
+    RegistrationWorkspace,
     available_pipelines,
     compiled_pipelines,
     core_api_version,
@@ -34,26 +36,40 @@ from .errors import (
 )
 from .recording import RecordingBundle, RecordingStats, RecordingWriter
 from .types import (
+    AlignmentConfig,
+    AlignmentStats,
     ColorCameraParams,
+    ColorOrder,
     ColorSettingCommand,
+    DepthSearchOptions,
     DeviceConfig,
+    DeviceState,
     FrameFormat,
     FrameType,
     IrCameraParams,
     LedSettings,
     LoggerLevel,
+    PacketPipelineConfig,
     Pipeline,
     ReplayCalibration,
+    RgbDecoder,
     Stream,
 )
 
+del PackageNotFoundError, version
+
 __all__ = [
+    "AlignmentConfig",
+    "AlignmentStats",
     "BackendUnavailableError",
     "Camera",
     "ColorCameraParams",
+    "ColorOrder",
     "ColorSettingCommand",
+    "DepthSearchOptions",
     "DeviceConfig",
     "DeviceOpenError",
+    "DeviceState",
     "DeviceStateError",
     "Frame",
     "FrameFormat",
@@ -62,8 +78,10 @@ __all__ = [
     "FrameType",
     "FreenectError",
     "IrCameraParams",
+    "LandmarkLiftResult",
     "LedSettings",
     "LoggerLevel",
+    "PacketPipelineConfig",
     "Pipeline",
     "RecordingBundle",
     "RecordingFormatError",
@@ -71,8 +89,10 @@ __all__ = [
     "RecordingWriter",
     "Registration",
     "RegistrationResult",
+    "RegistrationWorkspace",
     "ReplayCalibration",
     "ReplayError",
+    "RgbDecoder",
     "Stream",
     "available_pipelines",
     "compiled_pipelines",
@@ -115,4 +135,7 @@ def __getattr__(name: str) -> NoReturn:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))
+    # List the curated API plus real module attributes such as __version__
+    # and the submodules, without typing helpers or private globals.
+    public = {name for name in globals() if not name.startswith("_")} - {"NoReturn"}
+    return sorted(public | set(__all__) | {"__version__"})

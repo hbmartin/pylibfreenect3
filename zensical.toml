@@ -1,0 +1,58 @@
+[project]
+site_name = "pylibfreenect3"
+site_url = "https://hbmartin.github.io/pylibfreenect3/"
+site_description = "Safe, modern Python bindings for libfreenect2-metal."
+site_author = "pylibfreenect3 contributors"
+copyright = "Copyright &copy; 2026 pylibfreenect3 contributors"
+docs_dir = "docs"
+site_dir = "site"
+repo_url = "https://github.com/hbmartin/pylibfreenect3"
+repo_name = "hbmartin/pylibfreenect3"
+edit_uri = "edit/master/docs/"
+nav = [
+    { "Home" = "index.md" },
+    { "Installation" = "installation.md" },
+    { "Getting started" = "getstarted.md" },
+    { "OpenCV and registration" = "cookbook.md" },
+    { "API Reference" = "api/index.md" },
+    { "Development and releases" = "dev.md" },
+    { "GitHub" = "https://github.com/hbmartin/pylibfreenect3" },
+]
+
+[project.theme]
+features = [
+    "content.action.edit",
+    "content.action.view",
+    "content.code.copy",
+    "navigation.indexes",
+    "navigation.path",
+    "navigation.sections",
+    "navigation.top",
+    "navigation.tracking",
+    "search.highlight",
+]
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
+
+[project.plugins.macros]
+module_name = "docs_api_reference"
+on_error_fail = true
+
+[project.plugins.mkdocstrings.handlers.python]
+inventories = ["https://docs.python.org/3/objects.inv"]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+filters = ["!^_"]
+heading_level = 2
+inherited_members = true
+members_order = "source"
+separate_signature = true
+show_if_no_docstring = true
+show_root_full_path = false
+show_signature_annotations = true
+show_source = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true

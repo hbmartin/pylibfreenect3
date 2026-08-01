@@ -10,16 +10,23 @@ import numpy as np
 import numpy.typing as npt
 
 __all__ = [
+    "AlignmentConfig",
+    "AlignmentStats",
     "ColorCameraParams",
+    "ColorOrder",
     "ColorSettingCommand",
+    "DepthSearchOptions",
     "DeviceConfig",
+    "DeviceState",
     "FrameFormat",
     "FrameType",
     "IrCameraParams",
     "LedSettings",
     "LoggerLevel",
+    "PacketPipelineConfig",
     "Pipeline",
     "ReplayCalibration",
+    "RgbDecoder",
     "Stream",
 ]
 
@@ -53,6 +60,28 @@ class Pipeline(StrEnum):
     DUMP = "dump"
 
 
+class RgbDecoder(StrEnum):
+    AUTO = "auto"
+    TURBOJPEG = "turbojpeg"
+    VIDEOTOOLBOX = "videotoolbox"
+    VAAPI = "vaapi"
+    TEGRAJPEG = "tegrajpeg"
+
+
+class ColorOrder(StrEnum):
+    BGR = "bgr"
+    RGB = "rgb"
+
+
+class DeviceState(IntEnum):
+    CREATED = 0
+    OPEN = 1
+    STREAMING = 2
+    DISCONNECTED = 3
+    ERROR = 4
+    CLOSED = 5
+
+
 class FrameFormat(IntEnum):
     INVALID = 0
     RAW = 1
@@ -68,6 +97,89 @@ class LoggerLevel(IntEnum):
     WARNING = 2
     INFO = 3
     DEBUG = 4
+
+
+@dataclass(frozen=True, slots=True)
+class AlignmentConfig:
+    max_delta: float = 0.025
+    queue_capacity: int = 8
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.max_delta) or self.max_delta < 0:
+            raise ValueError("max_delta must be finite and non-negative")
+        if self.max_delta > 0xFFFFFFFF * 0.000125:
+            raise ValueError("max_delta exceeds the native timestamp range")
+        if (
+            not isinstance(self.queue_capacity, int)
+            or isinstance(self.queue_capacity, bool)
+            or self.queue_capacity <= 0
+        ):
+            raise ValueError("queue_capacity must be a positive integer")
+
+    @property
+    def max_delta_ticks(self) -> int:
+        return round(self.max_delta / 0.000125)
+
+
+@dataclass(frozen=True, slots=True)
+class AlignmentStats:
+    delivered: int
+    dropped: int
+    last_delta_ticks: int
+    maximum_delta_ticks: int
+
+    @property
+    def last_delta_seconds(self) -> float:
+        return self.last_delta_ticks * 0.000125
+
+    @property
+    def maximum_delta_seconds(self) -> float:
+        return self.maximum_delta_ticks * 0.000125
+
+    @property
+    def last_delta_milliseconds(self) -> float:
+        return self.last_delta_ticks * 0.125
+
+    @property
+    def maximum_delta_milliseconds(self) -> float:
+        return self.maximum_delta_ticks * 0.125
+
+
+@dataclass(frozen=True, slots=True)
+class PacketPipelineConfig:
+    rgb_decoder: RgbDecoder = RgbDecoder.AUTO
+    vaapi_device: str | None = None
+    allow_fallback: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rgb_decoder", RgbDecoder(self.rgb_decoder))
+        if self.vaapi_device is not None and not isinstance(self.vaapi_device, str):
+            raise TypeError("vaapi_device must be a string or None")
+        if not isinstance(self.allow_fallback, bool):
+            raise TypeError("allow_fallback must be bool")
+
+
+@dataclass(frozen=True, slots=True)
+class DepthSearchOptions:
+    primary_radius: int = 8
+    fallback_radius: int = 20
+    cluster_span_mm: float = 150.0
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.primary_radius, int)
+            or isinstance(self.primary_radius, bool)
+            or self.primary_radius < 0
+        ):
+            raise ValueError("primary_radius must be a non-negative integer")
+        if (
+            not isinstance(self.fallback_radius, int)
+            or isinstance(self.fallback_radius, bool)
+            or self.fallback_radius < self.primary_radius
+        ):
+            raise ValueError("fallback_radius must be at least primary_radius")
+        if not isfinite(self.cluster_span_mm) or self.cluster_span_mm < 0:
+            raise ValueError("cluster_span_mm must be finite and non-negative")
 
 
 class ColorSettingCommand(IntEnum):
@@ -185,6 +297,17 @@ class IrCameraParams:
             raise ValueError("IR camera parameters must be finite")
         if self.fx < 0 or self.fy < 0:
             raise ValueError("IR focal lengths must be non-negative")
+
+    def camera_matrix(self) -> npt.NDArray[np.float64]:
+        """Return the OpenCV-compatible 3x3 intrinsic matrix."""
+        return np.array(
+            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+
+    def distortion_coefficients(self) -> npt.NDArray[np.float64]:
+        """Return OpenCV distortion coefficients in k1, k2, p1, p2, k3 order."""
+        return np.array([self.k1, self.k2, self.p1, self.p2, self.k3], dtype=np.float64)
 
 
 @dataclass(frozen=True, slots=True)

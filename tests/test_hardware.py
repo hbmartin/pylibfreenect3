@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from pylibfreenect3 import (
+    AlignmentConfig,
     Camera,
     DeviceConfig,
     FrameFormat,
@@ -53,14 +54,19 @@ def _maximum_rss_bytes() -> int:
 )
 def test_kinect_capture_100_frames(pipeline: str) -> None:
     sequences: list[int] = []
-    with Camera.open(pipeline=pipeline, streams=("color", "ir", "depth")) as camera:
+    with Camera.open(
+        pipeline=pipeline,
+        streams=("color", "ir", "depth"),
+        alignment=AlignmentConfig(max_delta=0.025, queue_capacity=8),
+    ) as camera:
         if pipeline == "metal":
             assert camera.pipeline == "metal"
         else:
             assert camera.pipeline in AVAILABLE_PIPELINES
-        registration = Registration(
-            camera.device.ir_camera_params,
-            camera.device.color_camera_params,
+        registration = Registration.from_device(camera.device)
+        workspace = registration.workspace(
+            include_depth_to_color_map=True,
+            include_color_to_depth_map=True,
         )
         for index in range(100):
             with camera.capture(timeout=2.0) as frames:
@@ -75,12 +81,21 @@ def test_kinect_capture_100_frames(pipeline: str) -> None:
                 assert frames.depth.to_numpy().shape == (424, 512)
                 assert frames.color.timestamp > 0
                 assert frames.depth.timestamp > 0
+                assert frames.color.arrival_timestamp_us > 0
+                assert frames.depth.arrival_timestamp_us > 0
+                assert frames.alignment_delta_ticks is not None
+                assert frames.alignment_delta_ticks <= 200
                 sequences.append(frames.depth.sequence)
                 if index == 0:
-                    registered = registration.apply(frames.color, frames.depth)
+                    registered = workspace.apply(frames.color, frames.depth)
                     assert registered.undistorted.to_numpy().shape == (424, 512)
                     assert registered.registered.to_numpy().shape == (424, 512, 4)
+                    lifted = workspace.lift_normalized([[0.5, 0.5]])
+                    assert lifted.valid[0]
+                    assert np.isfinite(lifted.xyz[0]).all()
         assert all(right > left for left, right in itertools.pairwise(sequences))
+        assert camera.alignment_stats is not None
+        assert camera.alignment_stats.delivered >= 100
 
 
 @pytest.mark.hardware
@@ -95,10 +110,30 @@ def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
     )
     warmup_frames = min(90, max(30, frame_count // 10))
 
-    with Camera.open(pipeline=pipeline, streams=("color", "ir", "depth")) as camera:
+    with Camera.open(
+        pipeline=pipeline,
+        streams=("color", "ir", "depth"),
+        alignment=AlignmentConfig(max_delta=0.025, queue_capacity=8),
+    ) as camera:
+        registration = Registration.from_device(camera.device)
+        workspace = registration.workspace(
+            include_depth_to_color_map=True,
+            include_color_to_depth_map=True,
+        )
+        color_buffer = np.empty((1080, 1920, 3), dtype=np.uint8)
+        buffer_ids = (
+            id(workspace.result),
+            id(workspace.undistorted),
+            id(workspace.registered),
+            id(workspace.depth_to_color_map),
+            id(workspace.color_to_depth_map),
+            id(color_buffer),
+        )
         for _ in range(warmup_frames):
             with camera.capture(timeout=2.0) as frames:
                 assert np.isfinite(frames.depth.to_numpy()).any()
+                workspace.apply(frames.color, frames.depth)
+                assert frames.color.to_color(out=color_buffer) is color_buffer
         gc.collect()
         baseline = _maximum_rss_bytes()
 
@@ -109,6 +144,16 @@ def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
                 assert depth.shape == (424, 512)
                 assert frames.depth.sequence > previous_sequence
                 previous_sequence = frames.depth.sequence
+                assert workspace.apply(frames.color, frames.depth) is workspace.result
+                assert frames.color.to_color(out=color_buffer) is color_buffer
+                assert buffer_ids == (
+                    id(workspace.result),
+                    id(workspace.undistorted),
+                    id(workspace.registered),
+                    id(workspace.depth_to_color_map),
+                    id(workspace.color_to_depth_map),
+                    id(color_buffer),
+                )
             del depth
             if index and index % 300 == 0:
                 gc.collect()
@@ -125,7 +170,11 @@ def test_capture_memory_soak_reaches_rss_plateau(pipeline: str) -> None:
 @pytest.mark.hardware
 def test_cpu_capture_configuration_restart_and_outstanding_array() -> None:
     context = Context()
+    serial = context.default_device_serial_number()
+    assert serial
+    assert context.wait_for_device(serial, 2.0)
     device = context.open_device(pipeline="cpu")
+    assert device.state.name == "OPEN"
     listener = FrameListener(FrameType.COLOR | FrameType.IR | FrameType.DEPTH)
     device.configuration = DeviceConfig(
         min_depth=0.6,

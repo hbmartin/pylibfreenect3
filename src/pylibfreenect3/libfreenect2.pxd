@@ -1,6 +1,6 @@
 # distutils: language = c++
 
-from libc.stdint cimport uint16_t, uint32_t
+from libc.stdint cimport int32_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libcpp cimport bool
 from libcpp.map cimport map
 from libcpp.string cimport string
@@ -26,6 +26,7 @@ cdef extern from "libfreenect2/frame_listener.hpp" namespace "libfreenect2":
         size_t bytes_per_pixel
         unsigned char *data
         uint32_t timestamp
+        uint64_t arrival_timestamp_us
         uint32_t sequence
         float exposure
         float gain
@@ -35,7 +36,7 @@ cdef extern from "libfreenect2/frame_listener.hpp" namespace "libfreenect2":
         NativeFrame(size_t, size_t, size_t, unsigned char *) except +
 
     cdef cppclass NativeFrameListener "libfreenect2::FrameListener":
-        pass
+        bool onNewFrame(NativeFrameType, NativeFrame *) except + nogil
 
 cdef extern from "libfreenect2/frame_listener_impl.h" namespace "libfreenect2":
     cdef cppclass NativeSyncListener "libfreenect2::SyncMultiFrameListener":
@@ -44,6 +45,20 @@ cdef extern from "libfreenect2/frame_listener_impl.h" namespace "libfreenect2":
         void waitForNewFrame(map[NativeFrameType, NativeFrame *] &) except + nogil
         bool waitForNewFrame(map[NativeFrameType, NativeFrame *] &, int) except + nogil
         void release(map[NativeFrameType, NativeFrame *] &) except + nogil
+
+    cdef cppclass NativeAlignedListener "libfreenect2::TimestampAlignedFrameListener":
+        cppclass Statistics:
+            Statistics() except +
+            uint64_t delivered
+            uint64_t dropped
+            uint32_t last_delta_ticks
+            uint32_t maximum_delta_ticks
+        NativeAlignedListener(unsigned int, uint32_t, size_t) except +
+        bool hasNewFrame() except + nogil const
+        bool waitForNewFrame(map[NativeFrameType, NativeFrame *] &, int) except + nogil
+        void release(map[NativeFrameType, NativeFrame *] &) except + nogil
+        Statistics getStatistics() except + nogil const
+        bool onNewFrame(NativeFrameType, NativeFrame *) except + nogil
 
 cdef extern from "libfreenect2/color_settings.h" namespace "libfreenect2":
     cdef enum NativeColorSetting "libfreenect2::ColorSettingCommandType":
@@ -59,6 +74,19 @@ cdef extern from "libfreenect2/led_settings.h" namespace "libfreenect2":
         uint32_t Reserved
 
 cdef extern from "libfreenect2/packet_pipeline.h" namespace "libfreenect2":
+    cdef enum NativeRgbDecoder "libfreenect2::PacketPipelineConfig::RgbDecoder":
+        RGB_DECODER_AUTO "libfreenect2::PacketPipelineConfig::Auto"
+        RGB_DECODER_TURBOJPEG "libfreenect2::PacketPipelineConfig::TurboJPEG"
+        RGB_DECODER_VIDEOTOOLBOX "libfreenect2::PacketPipelineConfig::VideoToolbox"
+        RGB_DECODER_VAAPI "libfreenect2::PacketPipelineConfig::VAAPI"
+        RGB_DECODER_TEGRAJPEG "libfreenect2::PacketPipelineConfig::TegraJPEG"
+
+    cdef cppclass NativePacketPipelineConfig "libfreenect2::PacketPipelineConfig":
+        NativePacketPipelineConfig() except +
+        NativeRgbDecoder rgb_decoder
+        string vaapi_device
+        bool allow_fallback
+
     cdef cppclass NativePacketPipeline "libfreenect2::PacketPipeline":
         const string &getName() const
         bool good() const
@@ -70,7 +98,9 @@ cdef extern from "libfreenect2/packet_pipeline.h" namespace "libfreenect2":
         const short *getDepthLookupTable(size_t *)
 
     NativePacketPipeline *createPacketPipeline(const string &, int) except + nogil
+    NativePacketPipeline *createPacketPipeline(const string &, const NativePacketPipelineConfig &, int) except + nogil
     NativePacketPipeline *createDefaultPacketPipeline() except + nogil
+    NativePacketPipeline *createDefaultPacketPipeline(const NativePacketPipelineConfig &) except + nogil
     vector[string] getCompiledPacketPipelines() except + nogil
     vector[string] getAvailablePacketPipelines() except + nogil
 
@@ -78,6 +108,14 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
     string getVersion() except +
     uint32_t getApiVersion() except +
     string getBuildRevision() except +
+
+    cdef enum NativeDeviceState "libfreenect2::DeviceState":
+        DEVICE_CREATED "libfreenect2::DeviceCreated"
+        DEVICE_OPEN "libfreenect2::DeviceOpen"
+        DEVICE_STREAMING "libfreenect2::DeviceStreaming"
+        DEVICE_DISCONNECTED "libfreenect2::DeviceDisconnected"
+        DEVICE_ERROR "libfreenect2::DeviceError"
+        DEVICE_CLOSED "libfreenect2::DeviceClosed"
 
     cdef cppclass NativeDevice "libfreenect2::Freenect2Device":
         cppclass ColorCameraParams:
@@ -101,6 +139,8 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
         string getSerialNumber() except +
         string getFirmwareVersion() except +
         string getPacketPipelineName() except +
+        NativeDeviceState getState() except + nogil const
+        string getLastError() except + nogil const
         ColorCameraParams getColorCameraParams() except +
         IrCameraParams getIrCameraParams() except +
         void setColorCameraParams(const ColorCameraParams &) except + nogil
@@ -126,6 +166,7 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
         int enumerateDevices() except + nogil
         string getDeviceSerialNumber(int) except +
         string getDefaultDeviceSerialNumber() except +
+        bool waitForDevice(const string &, uint32_t, uint32_t) except + nogil
         NativeDevice *openDevice(int) except + nogil
         NativeDevice *openDevice(int, const NativePacketPipeline *) except + nogil
         NativeDevice *openDevice(const string &) except + nogil
@@ -156,6 +197,22 @@ cdef extern from "libfreenect2/registration.h" namespace "libfreenect2":
         void undistortDepth(const NativeFrame *, NativeFrame *) except + nogil
         void getPointXYZRGB(const NativeFrame *, const NativeFrame *, int, int, float &, float &, float &, float &) except + nogil
         void getPointXYZ(const NativeFrame *, int, int, float &, float &, float &) except + nogil
+
+cdef extern from "libfreenect2/vision.h" namespace "libfreenect2::vision":
+    cdef enum NativeColorOrder "libfreenect2::vision::ColorOrder":
+        COLOR_BGR "libfreenect2::vision::BGR"
+        COLOR_RGB "libfreenect2::vision::RGB"
+
+    cdef cppclass NativeDepthSearchOptions "libfreenect2::vision::DepthSearchOptions":
+        NativeDepthSearchOptions() except +
+        int primary_radius
+        int fallback_radius
+        float cluster_span_mm
+
+    bool convertColorFrame(const NativeFrame *, NativeColorOrder, unsigned char *, size_t) except + nogil
+    bool buildColorToDepthMap(const NativeFrame *, const int *, size_t, int32_t *, size_t) except + nogil
+    int findDepthPixel(float, float, const int32_t *, size_t, size_t, size_t, const NativeFrame *, const NativeDepthSearchOptions &) except + nogil
+    bool liftColorPoints(const NativeRegistration *, const NativeFrame *, const int32_t *, size_t, size_t, size_t, const float *, size_t, const NativeDepthSearchOptions &, float *, uint8_t *, int32_t *) except + nogil
 
 cdef extern from "libfreenect2/logger.h" namespace "libfreenect2":
     cdef enum NativeLoggerLevel "libfreenect2::Logger::Level":

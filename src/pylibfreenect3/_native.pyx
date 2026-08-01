@@ -3,7 +3,7 @@
 from cpython.exc cimport PyErr_CheckSignals
 from cpython.ref cimport Py_INCREF
 from cython.operator cimport dereference as deref, preincrement as inc
-from libc.stdint cimport uint32_t
+from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 from libc.string cimport memcpy, memset
 from libcpp.map cimport map
 from libcpp.string cimport string
@@ -13,6 +13,7 @@ cdef extern from "unistd.h":
     int c_getpid "getpid"() noexcept nogil
 
 import math
+import time
 import numpy as np
 cimport numpy as cnp
 
@@ -129,19 +130,24 @@ cdef class NativePipeline:
     cdef object requested_name
     cdef long owner_pid
 
-    def __cinit__(self, name, int device_id=-1):
+    def __cinit__(self, name, int device_id=-1, int rgb_decoder=0,
+                  vaapi_device=None, bint allow_fallback=True):
         self.ptr = NULL
         self.consumed = False
         self.device_closed = False
         self.requested_name = str(name)
         self.owner_pid = c_getpid()
         cdef string encoded = str(name).encode("utf-8")
+        cdef lf.NativePacketPipelineConfig config = lf.NativePacketPipelineConfig()
+        config.rgb_decoder = <lf.NativeRgbDecoder>rgb_decoder
+        config.vaapi_device = ("" if vaapi_device is None else str(vaapi_device)).encode("utf-8")
+        config.allow_fallback = allow_fallback
         try:
             with nogil:
                 if encoded == b"auto":
-                    self.ptr = lf.createDefaultPacketPipeline()
+                    self.ptr = lf.createDefaultPacketPipeline(config)
                 else:
-                    self.ptr = lf.createPacketPipeline(encoded, device_id)
+                    self.ptr = lf.createPacketPipeline(encoded, config, device_id)
         except Exception as error:
             raise BackendUnavailableError(f"pipeline {name!r} could not be constructed") from error
         if self.ptr == NULL:
@@ -241,6 +247,7 @@ cdef class NativePipeline:
 
 cdef class NativeFrameSet
 cdef class NativeSyncFrameListener
+cdef class NativeAlignedFrameListener
 
 
 cdef class NativeFrame:
@@ -271,6 +278,7 @@ cdef class NativeFrame:
     @staticmethod
     def allocate(size_t width, size_t height, size_t bytes_per_pixel, int frame_type=-1,
                  int frame_format=0, uint32_t timestamp=0, uint32_t sequence=0,
+                 uint64_t arrival_timestamp_us=0,
                  float exposure=0.0, float gain=0.0, float gamma=0.0,
                  uint32_t status=0):
         cdef NativeFrame result = NativeFrame()
@@ -281,6 +289,7 @@ cdef class NativeFrame:
         result.frame_type = frame_type
         result.ptr.format = <lf.NativeFrameFormat>frame_format
         result.ptr.timestamp = timestamp
+        result.ptr.arrival_timestamp_us = arrival_timestamp_us
         result.ptr.sequence = sequence
         result.ptr.exposure = exposure
         result.ptr.gain = gain
@@ -291,6 +300,7 @@ cdef class NativeFrame:
     @staticmethod
     def from_array(object array, int frame_type=-1, int frame_format=0,
                    uint32_t timestamp=0, uint32_t sequence=0,
+                   uint64_t arrival_timestamp_us=0,
                    float exposure=0.0, float gain=0.0, float gamma=0.0,
                    uint32_t status=0):
         cdef cnp.ndarray value = np.asarray(array)
@@ -336,6 +346,7 @@ cdef class NativeFrame:
         result.numpy_owner = value
         result.frame_type = frame_type
         result.ptr.timestamp = timestamp
+        result.ptr.arrival_timestamp_us = arrival_timestamp_us
         result.ptr.sequence = sequence
         result.ptr.exposure = exposure
         result.ptr.gain = gain
@@ -367,6 +378,11 @@ cdef class NativeFrame:
     def timestamp(self):
         self._check()
         return self.ptr.timestamp
+
+    @property
+    def arrival_timestamp_us(self):
+        self._check()
+        return self.ptr.arrival_timestamp_us
 
     @property
     def sequence(self):
@@ -437,6 +453,27 @@ cdef class NativeFrame:
             raise MemoryError("failed to attach frame lifetime to NumPy array")
         return array.copy() if copy else array
 
+    def to_color(self, object output, int order):
+        self._check()
+        cdef cnp.ndarray destination = np.asarray(output)
+        cdef bint ok
+        cdef unsigned char *destination_ptr
+        cdef size_t destination_size
+        if (destination.dtype != np.dtype(np.uint8) or destination.ndim != 3 or
+                destination.shape[0] != self.ptr.height or
+                destination.shape[1] != self.ptr.width or destination.shape[2] != 3 or
+                not destination.flags.c_contiguous or not destination.flags.writeable):
+            raise ValueError("output must be a writable contiguous (height, width, 3) uint8 array")
+        destination_ptr = <unsigned char *>cnp.PyArray_DATA(destination)
+        destination_size = destination.nbytes
+        with nogil:
+            ok = lf.convertColorFrame(
+                self.ptr, <lf.NativeColorOrder>order, destination_ptr, destination_size
+            )
+        if not ok:
+            raise ValueError("frame is not a valid BGRX/RGBX color frame")
+        return output
+
 
 cdef NativeFrame _borrow_frame(lf.NativeFrame *ptr, int frame_type, NativeFrameSet parent):
     cdef NativeFrame result = NativeFrame()
@@ -455,6 +492,7 @@ cdef class NativeFrameSet:
     cdef bint release_requested
     cdef bint released
     cdef bint owns_frames
+    cdef long long alignment_delta_ticks
     cdef long owner_pid
 
     def __cinit__(self):
@@ -464,13 +502,17 @@ cdef class NativeFrameSet:
         self.release_requested = False
         self.released = False
         self.owns_frames = False
+        self.alignment_delta_ticks = -1
         self.owner_pid = c_getpid()
 
     def __dealloc__(self):
         if (self.owner_pid == c_getpid() and self.filled and
                 not self.released):
             if self.listener is not None:
-                (<NativeSyncFrameListener>self.listener)._release_native(self)
+                if isinstance(self.listener, NativeAlignedFrameListener):
+                    (<NativeAlignedFrameListener>self.listener)._release_native(self)
+                else:
+                    (<NativeSyncFrameListener>self.listener)._release_native(self)
             elif self.owns_frames:
                 self._release_owned()
 
@@ -493,7 +535,10 @@ cdef class NativeFrameSet:
     cdef void _maybe_release(self):
         if self.release_requested and self.borrow_count == 0 and not self.released:
             if self.listener is not None:
-                (<NativeSyncFrameListener>self.listener)._release_native(self)
+                if isinstance(self.listener, NativeAlignedFrameListener):
+                    (<NativeAlignedFrameListener>self.listener)._release_native(self)
+                else:
+                    (<NativeSyncFrameListener>self.listener)._release_native(self)
             elif self.owns_frames:
                 self._release_owned()
             else:
@@ -538,6 +583,11 @@ cdef class NativeFrameSet:
         _require_process(self.owner_pid)
         return self.frames.size()
 
+    @property
+    def delta_ticks(self):
+        _require_process(self.owner_pid)
+        return None if self.alignment_delta_ticks < 0 else self.alignment_delta_ticks
+
 
 def _testing_frame_set():
     """Build a tiny owned native set for hardware-free lifetime tests."""
@@ -546,9 +596,11 @@ def _testing_frame_set():
     cdef lf.NativeFrame *depth = new lf.NativeFrame(2, 1, 4, NULL)
     color.format = lf.FORMAT_BGRX
     color.timestamp = 10
+    color.arrival_timestamp_us = 1000
     color.sequence = 1
     depth.format = lf.FORMAT_FLOAT
     depth.timestamp = 11
+    depth.arrival_timestamp_us = 1100
     depth.sequence = 2
     result.frames[lf.FRAME_COLOR] = color
     result.frames[lf.FRAME_DEPTH] = depth
@@ -620,6 +672,96 @@ cdef class NativeSyncFrameListener:
             frame_set.released = True
 
 
+cdef class NativeAlignedFrameListener:
+    cdef lf.NativeAlignedListener *ptr
+    cdef long owner_pid
+
+    def __cinit__(self, unsigned int frame_types, uint32_t max_delta_ticks,
+                  size_t queue_capacity=8):
+        self.owner_pid = c_getpid()
+        self.ptr = new lf.NativeAlignedListener(frame_types, max_delta_ticks, queue_capacity)
+
+    def __dealloc__(self):
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
+            del self.ptr
+            self.ptr = NULL
+
+    @property
+    def _listener_address(self):
+        _require_process(self.owner_pid)
+        return <size_t><lf.NativeFrameListener *>self.ptr
+
+    def has_new_frame(self):
+        _require_process(self.owner_pid)
+        return self.ptr.hasNewFrame() != 0
+
+    def wait(self, timeout=None):
+        _require_process(self.owner_pid)
+        cdef NativeFrameSet result = NativeFrameSet()
+        cdef lf.NativeAlignedListener.Statistics statistics
+        cdef bint ok = True
+        cdef int milliseconds
+        cdef double seconds
+        result.listener = self
+        if timeout is None:
+            while True:
+                with nogil:
+                    ok = self.ptr.waitForNewFrame(result.frames, _WAIT_SLICE_MS)
+                if ok:
+                    break
+                with nogil:
+                    self.ptr.release(result.frames)
+                PyErr_CheckSignals()
+        else:
+            seconds = float(timeout)
+            if seconds < 0:
+                raise ValueError("timeout must be non-negative")
+            milliseconds = 0 if seconds == 0 else max(1, math.ceil(seconds * 1000.0))
+            with nogil:
+                ok = self.ptr.waitForNewFrame(result.frames, milliseconds)
+        if not ok:
+            result.filled = True
+            self._release_native(result)
+            raise FrameTimeoutError("timed out waiting for timestamp-aligned frames")
+        with nogil:
+            statistics = self.ptr.getStatistics()
+        result.alignment_delta_ticks = statistics.last_delta_ticks
+        result.filled = True
+        return result
+
+    def statistics(self):
+        _require_process(self.owner_pid)
+        cdef lf.NativeAlignedListener.Statistics value
+        with nogil:
+            value = self.ptr.getStatistics()
+        return {
+            "delivered": value.delivered,
+            "dropped": value.dropped,
+            "last_delta_ticks": value.last_delta_ticks,
+            "maximum_delta_ticks": value.maximum_delta_ticks,
+        }
+
+    def _testing_push(self, int frame_type, NativeFrame frame not None):
+        """Inject a frame into the native queue for hardware-free tests."""
+        _require_process(self.owner_pid)
+        frame._check()
+        cdef bint accepted
+        cdef lf.NativeFrameType native_type = _frame_type(frame_type)
+        with nogil:
+            accepted = self.ptr.onNewFrame(native_type, frame.ptr)
+        if accepted:
+            frame.ptr = NULL
+            frame.owns_ptr = False
+        return accepted != 0
+
+    cdef void _release_native(self, NativeFrameSet frame_set):
+        _require_process(self.owner_pid)
+        if self.ptr != NULL and frame_set.filled and not frame_set.released:
+            with nogil:
+                self.ptr.release(frame_set.frames)
+            frame_set.released = True
+
+
 cdef class NativeDeviceHandle:
     cdef lf.NativeDevice *ptr
     cdef object owner
@@ -680,6 +822,26 @@ cdef class NativeDeviceHandle:
         self._check()
         return _text(self.ptr.getPacketPipelineName())
 
+    @property
+    def state(self):
+        _require_process(self.owner_pid)
+        if self.ptr == NULL:
+            return <int>lf.DEVICE_CLOSED
+        cdef lf.NativeDeviceState value
+        with nogil:
+            value = self.ptr.getState()
+        return <int>value
+
+    @property
+    def last_error(self):
+        _require_process(self.owner_pid)
+        if self.ptr == NULL:
+            return ""
+        cdef string value
+        with nogil:
+            value = self.ptr.getLastError()
+        return _text(value)
+
     def color_camera_params(self):
         self._check()
         cdef lf.NativeDevice.ColorCameraParams p = self.ptr.getColorCameraParams()
@@ -731,18 +893,18 @@ cdef class NativeDeviceHandle:
         with nogil:
             self.ptr.setConfiguration(value)
 
-    def set_color_listener(self, NativeSyncFrameListener listener not None):
+    def set_color_listener(self, listener not None):
         self._check_stopped()
-        _require_process(listener.owner_pid)
+        cdef size_t listener_address = listener._listener_address
         with nogil:
-            self.ptr.setColorFrameListener(<lf.NativeFrameListener *>listener.ptr)
+            self.ptr.setColorFrameListener(<lf.NativeFrameListener *>listener_address)
         self.color_listener = listener
 
-    def set_depth_listener(self, NativeSyncFrameListener listener not None):
+    def set_depth_listener(self, listener not None):
         self._check_stopped()
-        _require_process(listener.owner_pid)
+        cdef size_t listener_address = listener._listener_address
         with nogil:
-            self.ptr.setIrAndDepthFrameListener(<lf.NativeFrameListener *>listener.ptr)
+            self.ptr.setIrAndDepthFrameListener(<lf.NativeFrameListener *>listener_address)
         self.depth_listener = listener
 
     def set_color_auto_exposure(self, float compensation=0.0):
@@ -923,6 +1085,35 @@ cdef class NativeFreenect2Context:
         _require_process(self.owner_pid)
         return _text(self.ptr.getDefaultDeviceSerialNumber())
 
+    def wait_for_device(self, serial, double timeout, double poll_interval=0.25):
+        _require_process(self.owner_pid)
+        if timeout < 0 or not math.isfinite(timeout):
+            raise ValueError("timeout must be finite and non-negative")
+        if poll_interval <= 0 or not math.isfinite(poll_interval):
+            raise ValueError("poll_interval must be finite and positive")
+        cdef string encoded = str(serial).encode("utf-8")
+        if encoded.empty():
+            raise ValueError("serial must not be empty")
+        cdef double deadline = time.monotonic() + timeout
+        cdef double remaining
+        cdef uint32_t slice_ms
+        cdef uint32_t poll_ms = max(1, min(0xFFFFFFFF, math.ceil(poll_interval * 1000.0)))
+        cdef bint found
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Preserve the core's single enumeration attempt for a zero timeout.
+                slice_ms = 0
+            else:
+                slice_ms = max(1, min(100, math.ceil(remaining * 1000.0)))
+            with nogil:
+                found = self.ptr.waitForDevice(encoded, slice_ms, poll_ms)
+            if found:
+                return True
+            PyErr_CheckSignals()
+            if remaining <= 0 or time.monotonic() >= deadline:
+                return False
+
     def open_device(self, name=None, NativePipeline pipeline=None):
         _require_process(self.owner_pid)
         cdef lf.NativeDevice *device = NULL
@@ -1090,6 +1281,88 @@ cdef class NativeRegistrationHandle:
         with nogil:
             self.ptr.getPointXYZ(undistorted.ptr, row, column, x, y, z)
         return x, y, z
+
+    def points_xyz(self, NativeFrame undistorted not None, object pixels):
+        self._check()
+        undistorted._check()
+        cdef cnp.ndarray coordinates = np.asarray(pixels)
+        if (coordinates.dtype != np.dtype(np.int32) or coordinates.ndim != 2 or
+                coordinates.shape[1] != 2 or not coordinates.flags.c_contiguous):
+            raise ValueError("pixels must be a contiguous (N, 2) int32 array")
+        cdef cnp.ndarray output = np.empty((coordinates.shape[0], 3), dtype=np.float32)
+        cdef int32_t *pixel_data = <int32_t *>cnp.PyArray_DATA(coordinates)
+        cdef float *xyz = <float *>cnp.PyArray_DATA(output)
+        cdef size_t count = coordinates.shape[0]
+        cdef size_t i
+        with nogil:
+            for i in range(count):
+                self.ptr.getPointXYZ(
+                    undistorted.ptr, pixel_data[i * 2], pixel_data[i * 2 + 1],
+                    xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]
+                )
+        return output
+
+    def build_color_to_depth_map(self, NativeFrame undistorted not None,
+                                 object depth_to_color, object color_to_depth):
+        self._check()
+        undistorted._check()
+        cdef cnp.ndarray forward = np.asarray(depth_to_color)
+        cdef cnp.ndarray reverse = np.asarray(color_to_depth)
+        if (forward.dtype != np.dtype(np.int32) or forward.size != 512 * 424 or
+                not forward.flags.c_contiguous):
+            raise ValueError("depth_to_color_map must be contiguous int32 with shape (424, 512)")
+        if (reverse.dtype != np.dtype(np.int32) or reverse.size != 1920 * 1080 or
+                not reverse.flags.c_contiguous or not reverse.flags.writeable):
+            raise ValueError("color_to_depth_map must be writable contiguous int32 with shape (1080, 1920)")
+        cdef bint ok
+        cdef int *forward_ptr = <int *>cnp.PyArray_DATA(forward)
+        cdef int32_t *reverse_ptr = <int32_t *>cnp.PyArray_DATA(reverse)
+        cdef size_t forward_count = forward.size
+        cdef size_t reverse_count = reverse.size
+        with nogil:
+            ok = lf.buildColorToDepthMap(
+                undistorted.ptr, forward_ptr, forward_count, reverse_ptr, reverse_count
+            )
+        if not ok:
+            raise ValueError("could not build color-to-depth map")
+
+    def lift_normalized(self, NativeFrame undistorted not None, object color_to_depth,
+                        object normalized_xy, int primary_radius, int fallback_radius,
+                        float cluster_span_mm):
+        self._check()
+        undistorted._check()
+        cdef cnp.ndarray reverse = np.asarray(color_to_depth)
+        cdef cnp.ndarray points = np.asarray(normalized_xy)
+        if (reverse.dtype != np.dtype(np.int32) or reverse.ndim != 2 or
+                reverse.shape[0] != 1080 or reverse.shape[1] != 1920 or
+                not reverse.flags.c_contiguous):
+            raise ValueError("color_to_depth_map must be contiguous (1080, 1920) int32")
+        if (points.dtype != np.dtype(np.float32) or points.ndim != 2 or
+                points.shape[1] != 2 or not points.flags.c_contiguous):
+            raise ValueError("normalized points must be contiguous (N, 2) float32")
+        cdef cnp.ndarray xyz = np.empty((points.shape[0], 3), dtype=np.float32)
+        cdef cnp.ndarray valid = np.empty(points.shape[0], dtype=np.bool_)
+        cdef cnp.ndarray indices = np.empty(points.shape[0], dtype=np.int32)
+        cdef lf.NativeDepthSearchOptions options = lf.NativeDepthSearchOptions()
+        options.primary_radius = primary_radius
+        options.fallback_radius = fallback_radius
+        options.cluster_span_mm = cluster_span_mm
+        cdef bint ok
+        cdef int32_t *reverse_ptr = <int32_t *>cnp.PyArray_DATA(reverse)
+        cdef float *points_ptr = <float *>cnp.PyArray_DATA(points)
+        cdef float *xyz_ptr = <float *>cnp.PyArray_DATA(xyz)
+        cdef uint8_t *valid_ptr = <uint8_t *>cnp.PyArray_DATA(valid)
+        cdef int32_t *indices_ptr = <int32_t *>cnp.PyArray_DATA(indices)
+        cdef size_t reverse_count = reverse.size
+        cdef size_t point_count = points.shape[0]
+        with nogil:
+            ok = lf.liftColorPoints(
+                self.ptr, undistorted.ptr, reverse_ptr, reverse_count, 1920, 1080,
+                points_ptr, point_count, options, xyz_ptr, valid_ptr, indices_ptr
+            )
+        if not ok:
+            raise ValueError("could not lift normalized color points")
+        return xyz, valid, indices
 
     def point_xyz_rgb(self, NativeFrame undistorted not None,
                       NativeFrame registered not None, int row, int column):
