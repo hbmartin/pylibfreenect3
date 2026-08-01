@@ -375,6 +375,7 @@ All library-specific exceptions inherit from `FreenectError`:
 | `BackendUnavailableError` | A requested packet pipeline is not compiled or usable |
 | `DeviceOpenError` | A physical or replay device cannot be opened |
 | `DeviceStateError` | An operation is invalid for the current lifecycle state |
+| `WorkspaceStateError` | A registration workspace lacks applied data or a required map |
 | `FrameTimeoutError` | No synchronized frame set arrives before the timeout |
 | `ReplayError` | Raw packet replay fails |
 | `RecordingFormatError` | A bundle is invalid, incomplete, unsafe, or incompatible |

@@ -14,8 +14,8 @@ class DeviceStateError(FreenectError):
     """An operation is invalid for the current device/frame state."""
 
 
-class WorkspaceStateError(FreenectError):
-    """A registration workspace was used before the required apply() call."""
+class WorkspaceStateError(DeviceStateError):
+    """A registration workspace lacks applied data or a required map."""
 
 
 class FrameTimeoutError(FreenectError, TimeoutError):

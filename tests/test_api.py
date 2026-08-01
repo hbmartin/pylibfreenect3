@@ -695,7 +695,7 @@ def test_registration_workspace_maps_batch_and_lifting() -> None:
         include_depth_to_color_map=True,
         include_color_to_depth_map=True,
     )
-    assert issubclass(f3.WorkspaceStateError, f3.FreenectError)
+    assert issubclass(f3.WorkspaceStateError, f3.DeviceStateError)
     with pytest.raises(f3.WorkspaceStateError, match="has not been applied"):
         workspace.lift_normalized([[0.5, 0.5]])
 
