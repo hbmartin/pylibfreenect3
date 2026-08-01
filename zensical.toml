@@ -16,6 +16,7 @@ nav = [
     { "OpenCV and registration" = "cookbook.md" },
     { "API Reference" = "api/index.md" },
     { "Development and releases" = "dev.md" },
+    { "Maintainer guide" = "maintainers.md" },
     { "GitHub" = "https://github.com/hbmartin/pylibfreenect3" },
 ]
 
