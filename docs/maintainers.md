@@ -259,7 +259,7 @@ uv version "$release_version"
 
 `uv version` updates `pyproject.toml` and re-locks the project. Also:
 
-- change the source-checkout fallback in `pylibfreenect3/__init__.py` to the
+- change the source-checkout fallback in `src/pylibfreenect3/__init__.py` to the
   corresponding `.dev0` value;
 - add the release section to `NEWS.md`;
 - update release-specific statements in the README and docs;
