@@ -15,12 +15,9 @@ concurrency:
 jobs:
   deploy:
     permissions:
-      # Required by actions/checkout to read the repository contents.
-      contents: read
-      # Required to publish the built site to GitHub Pages.
-      pages: write
-      # Required to mint the OIDC token used by actions/deploy-pages.
-      id-token: write
+      contents: read # Required by actions/checkout to read the repository contents.
+      pages: write # Required to publish the built site to GitHub Pages.
+      id-token: write # Required to mint the OIDC token used by actions/deploy-pages.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

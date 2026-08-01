@@ -17,7 +17,7 @@ examples/mediapipe_pose/setup_demo.sh
 
 `setup_demo.sh` creates `examples/mediapipe_pose/.venv`, installs
 `mediapipe==0.10.35`, `numpy==2.5.1`, and
-`opencv-contrib-python==4.13.0.92`, and downloads revision 1 of the official
+`opencv-contrib-python==4.14.0.94`, and downloads revision 1 of the official
 Full FP16 model. The download is accepted only when its SHA-256 is
 `5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1`.
 
