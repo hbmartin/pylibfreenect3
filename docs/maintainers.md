@@ -32,7 +32,7 @@ The main maintenance surfaces are:
 | CI core revision and release core tag | `.github/workflows/wheels.yml` |
 | Bundled dependency versions, hashes, and core build flags | `tools/build_wheel_dependencies.sh` |
 | Required wheel contents and dependency closure | `tools/verify_wheel.py` |
-| Recording compatibility | `SCHEMA_VERSION` and manifest validation in `recording.py` |
+| Recording compatibility | Native core loader plus `pylibfreenect3.legacy` for 1.x bundles |
 | Documentation navigation and build | `zensical.toml` and `docs/` |
 
 Keep duplicated values coordinated. A search for the old version, core tag,
@@ -139,8 +139,9 @@ the `sanitizers` job in `.github/workflows/wheels.yml`.
 
 ### Core and recording compatibility
 
-The current binding requires libfreenect2 0.3.x, API 3, and the newer
-`libfreenect2/vision.h` surface. Changing that contract affects more than the
+The current binding requires libfreenect2 0.4.x and API 4, including its
+vision, calibration-profile, projective-registration, runtime-statistics, and
+canonical recording surfaces. Changing that contract affects more than the
 build:
 
 - update the core version, runtime API, and symbol probe in
@@ -148,18 +149,18 @@ build:
 - update the default CI core commit and release tag in `wheels.yml`;
 - update the release-tag check in `build_wheel_dependencies.sh`;
 - audit native declarations and every linked symbol;
-- revisit the version/API validation in `RecordingBundle.open()` and retain
-  tests for old supported recordings; and
+- preserve the explicit legacy reader and retain tests for old supported
+  recordings; and
 - update platform/support documentation and `NEWS.md`.
 
-Do not relax recording validation merely to accept a new core. Decide whether
-the on-disk schema and packet/calibration data are genuinely compatible. If a
-schema change is necessary, add an explicit versioned reader or migration path
-rather than reinterpreting schema v1.
+Do not parse or relax canonical recording validation in Python. Native core
+versions 1 and 2 are authoritative. If the canonical schema changes, update
+the coordinated core first; retain the isolated legacy Python-bundle reader
+only for the former pylibfreenect3 1.x format.
 
 ## Understanding CI
 
-The `1.0 quality and release artifacts` workflow has three triggers:
+The `2.0 quality and release artifacts` workflow has three triggers:
 
 - every pull request;
 - manual dispatch, optionally with a `libfreenect2-metal` ref; and
@@ -267,7 +268,7 @@ uv version "$release_version"
 - search for the previous package version and coordinated core tag.
 
 For the current compatibility line, a release tag resolves the core as
-`v0.3.0`, and `build_wheel_dependencies.sh` enforces that exact tag. If the
+`v0.4.0`, and `build_wheel_dependencies.sh` enforces that exact tag. If the
 coordinated core release changes, make that a reviewed code change—do not use a
 different manual `core_ref` as a substitute for updating the release policy.
 

@@ -4,9 +4,9 @@ from typing import NoReturn
 try:
     __version__ = version("pylibfreenect3")
 except PackageNotFoundError:
-    __version__ = "1.0.0.dev0"
+    __version__ = "2.0.0.dev0"
 
-from . import lowlevel
+from . import legacy, lowlevel
 from .api import (
     Camera,
     Frame,
@@ -25,26 +25,35 @@ from .api import (
     logger_level_name,
     set_global_log_level,
 )
+from .calibration import CalibrationProfile, ProjectiveRegistration
 from .errors import (
     BackendUnavailableError,
+    CalibrationError,
     DeviceOpenError,
     DeviceStateError,
     FrameTimeoutError,
     FreenectError,
+    RecordingError,
     RecordingFormatError,
     ReplayError,
     WorkspaceStateError,
 )
-from .recording import RecordingBundle, RecordingStats, RecordingWriter
+from .recording import RecordingStats, RecordingWriter
 from .types import (
     AlignmentConfig,
     AlignmentStats,
+    CalibrationProvenance,
+    CalibrationQualityMetrics,
     ColorCameraParams,
     ColorOrder,
     ColorSettingCommand,
+    DepthCorrectionModel,
+    DepthCorrectionProfile,
     DepthSearchOptions,
     DeviceConfig,
+    DeviceRuntimeStats,
     DeviceState,
+    DistortionModel,
     FrameFormat,
     FrameType,
     IrCameraParams,
@@ -52,9 +61,15 @@ from .types import (
     LoggerLevel,
     PacketPipelineConfig,
     Pipeline,
+    ProjectiveCameraModel,
+    ProjectiveRegistrationOptions,
+    RegistrationRasterization,
     ReplayCalibration,
+    ReplayOptions,
     RgbDecoder,
+    RigidTransform,
     Stream,
+    StreamRuntimeStats,
 )
 
 del PackageNotFoundError, version
@@ -63,15 +78,23 @@ __all__ = [
     "AlignmentConfig",
     "AlignmentStats",
     "BackendUnavailableError",
+    "CalibrationError",
+    "CalibrationProfile",
+    "CalibrationProvenance",
+    "CalibrationQualityMetrics",
     "Camera",
     "ColorCameraParams",
     "ColorOrder",
     "ColorSettingCommand",
+    "DepthCorrectionModel",
+    "DepthCorrectionProfile",
     "DepthSearchOptions",
     "DeviceConfig",
     "DeviceOpenError",
+    "DeviceRuntimeStats",
     "DeviceState",
     "DeviceStateError",
+    "DistortionModel",
     "Frame",
     "FrameFormat",
     "FrameSet",
@@ -84,17 +107,24 @@ __all__ = [
     "LoggerLevel",
     "PacketPipelineConfig",
     "Pipeline",
-    "RecordingBundle",
+    "ProjectiveCameraModel",
+    "ProjectiveRegistration",
+    "ProjectiveRegistrationOptions",
+    "RecordingError",
     "RecordingFormatError",
     "RecordingStats",
     "RecordingWriter",
     "Registration",
+    "RegistrationRasterization",
     "RegistrationResult",
     "RegistrationWorkspace",
     "ReplayCalibration",
     "ReplayError",
+    "ReplayOptions",
     "RgbDecoder",
+    "RigidTransform",
     "Stream",
+    "StreamRuntimeStats",
     "WorkspaceStateError",
     "available_pipelines",
     "compiled_pipelines",
@@ -103,6 +133,7 @@ __all__ = [
     "core_version",
     "default_logger_level",
     "global_logger_level",
+    "legacy",
     "logger_level_name",
     "lowlevel",
     "set_global_log_level",
@@ -124,14 +155,16 @@ _MOVED_SYMBOLS = {
     "DumpPacketPipeline": "pylibfreenect3.lowlevel.DumpPacketPipeline",
     "STREAM_NAMES": "pylibfreenect3.Stream",
     "core_revision": "pylibfreenect3.core_build_revision",
+    "RecordingBundle": "pylibfreenect3.legacy.RecordingBundle",
 }
 
 
 def __getattr__(name: str) -> NoReturn:
     replacement = _MOVED_SYMBOLS.get(name)
     if replacement is not None:
+        release = "2.0" if name == "RecordingBundle" else "1.0"
         raise AttributeError(
-            f"pylibfreenect3.{name} was removed in 1.0; use {replacement} instead"
+            f"pylibfreenect3.{name} was removed in {release}; use {replacement} instead"
         )
     raise AttributeError(f"module 'pylibfreenect3' has no attribute {name!r}")
 

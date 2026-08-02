@@ -3,6 +3,7 @@
 from libc.stdint cimport int32_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libcpp cimport bool
 from libcpp.map cimport map
+from libcpp.memory cimport unique_ptr
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -34,6 +35,7 @@ cdef extern from "libfreenect2/frame_listener.hpp" namespace "libfreenect2":
         uint32_t status
         NativeFrameFormat format
         NativeFrame(size_t, size_t, size_t, unsigned char *) except +
+        NativeFrame(size_t, size_t, size_t, unsigned char *, NativeFrameFormat) except +
 
     cdef cppclass NativeFrameListener "libfreenect2::FrameListener":
         bool onNewFrame(NativeFrameType, NativeFrame *) except + nogil
@@ -104,6 +106,105 @@ cdef extern from "libfreenect2/packet_pipeline.h" namespace "libfreenect2":
     vector[string] getCompiledPacketPipelines() except + nogil
     vector[string] getAvailablePacketPipelines() except + nogil
 
+cdef extern from "libfreenect2/depth_calibration.h" namespace "libfreenect2":
+    cdef enum NativeDepthCorrectionModel "libfreenect2::DepthCorrectionProfile::Model":
+        DEPTH_CORRECTION_OFFSET "libfreenect2::DepthCorrectionProfile::OffsetOnly"
+        DEPTH_CORRECTION_LINEAR "libfreenect2::DepthCorrectionProfile::Linear"
+
+    cdef cppclass NativeDepthCorrectionProfile "libfreenect2::DepthCorrectionProfile":
+        NativeDepthCorrectionProfile() except +
+        NativeDepthCorrectionModel model
+        double scale
+        double offset_mm
+        double rmse_mm
+
+cdef extern from "libfreenect2/calibration_profile.h" namespace "libfreenect2":
+    cdef enum NativeDistortionModel "libfreenect2::DistortionModel":
+        DISTORTION_NONE "libfreenect2::DistortionModel::None"
+        DISTORTION_BROWN_CONRADY_5 "libfreenect2::DistortionModel::BrownConrady5"
+        DISTORTION_RATIONAL_8 "libfreenect2::DistortionModel::Rational8"
+
+    cdef cppclass NativeProjectiveCameraModel "libfreenect2::ProjectiveCameraModel":
+        NativeProjectiveCameraModel() except +
+        uint32_t width
+        uint32_t height
+        double fx
+        double fy
+        double cx
+        double cy
+        NativeDistortionModel distortion_model
+        bool isValid(string *) except + nogil const
+        NativeProjectiveCameraModel scaledTo(uint32_t, uint32_t) except + nogil const
+        NativeProjectiveCameraModel rectified() except + nogil const
+
+    cdef cppclass NativeRigidTransform "libfreenect2::RigidTransform":
+        NativeRigidTransform() except +
+
+    cdef cppclass NativeCalibrationQualityMetrics "libfreenect2::CalibrationQualityMetrics":
+        NativeCalibrationQualityMetrics() except +
+        uint32_t color_views
+        uint32_t ir_views
+        uint32_t stereo_views
+        uint32_t depth_views
+        double color_rms_px
+        double ir_rms_px
+        double held_out_stereo_rms_px
+        double depth_rmse_mm
+
+    cdef cppclass NativeCalibrationProfile "libfreenect2::CalibrationProfile":
+        NativeCalibrationProfile() except +
+        NativeCalibrationProfile(const NativeCalibrationProfile &) except +
+        uint32_t schemaVersion() except + nogil const
+        const string &serial() except + nogil const
+        const string &firmware() except + nogil const
+        const NativeProjectiveCameraModel &colorCamera() except + nogil const
+        const NativeProjectiveCameraModel &irCamera() except + nogil const
+        const NativeRigidTransform &depthToColor() except + nogil const
+        bool hasDepthCorrection() except + nogil const
+        const NativeDepthCorrectionProfile &depthCorrection() except + nogil const
+        bool hasQualityMetrics() except + nogil const
+        const NativeCalibrationQualityMetrics &qualityMetrics() except + nogil const
+        const string &createdUtc() except + nogil const
+        const string &toolVersion() except + nogil const
+        const string &jobSha256() except + nogil const
+        bool matchesDevice(const string &, const string &, bool, string *, string *) except + nogil const
+        bool save(const string &, string *) except + nogil const
+        @staticmethod
+        bool load(const string &, NativeCalibrationProfile &, string *) except + nogil
+
+cdef extern from *:
+    """
+    #include <libfreenect2/calibration_profile.h>
+    static inline double pylibf3_camera_distortion(
+        const libfreenect2::ProjectiveCameraModel& value, size_t index) {
+      return value.distortion[index];
+    }
+    static inline void pylibf3_set_camera_distortion(
+        libfreenect2::ProjectiveCameraModel& value, size_t index, double coefficient) {
+      value.distortion[index] = coefficient;
+    }
+    static inline double pylibf3_rotation(
+        const libfreenect2::RigidTransform& value, size_t index) {
+      return value.rotation[index];
+    }
+    static inline double pylibf3_translation(
+        const libfreenect2::RigidTransform& value, size_t index) {
+      return value.translation_m[index];
+    }
+    """
+    double cameraDistortion "pylibf3_camera_distortion"(
+        const NativeProjectiveCameraModel &, size_t
+    ) noexcept nogil
+    void setCameraDistortion "pylibf3_set_camera_distortion"(
+        NativeProjectiveCameraModel &, size_t, double
+    ) noexcept nogil
+    double rigidRotation "pylibf3_rotation"(
+        const NativeRigidTransform &, size_t
+    ) noexcept nogil
+    double rigidTranslation "pylibf3_translation"(
+        const NativeRigidTransform &, size_t
+    ) noexcept nogil
+
 cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
     string getVersion() except +
     uint32_t getApiVersion() except +
@@ -116,6 +217,27 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
         DEVICE_DISCONNECTED "libfreenect2::DeviceDisconnected"
         DEVICE_ERROR "libfreenect2::DeviceError"
         DEVICE_CLOSED "libfreenect2::DeviceClosed"
+
+    cdef cppclass NativeStreamRuntimeStatistics "libfreenect2::StreamRuntimeStatistics":
+        uint64_t decoded_frames
+        uint64_t status_error_frames
+        uint64_t sequence_gaps
+        uint32_t last_sequence
+        uint32_t last_device_timestamp
+        uint64_t last_arrival_timestamp_us
+
+    cdef cppclass NativeDeviceRuntimeStatistics "libfreenect2::DeviceRuntimeStatistics":
+        NativeStreamRuntimeStatistics color
+        NativeStreamRuntimeStatistics ir
+        NativeStreamRuntimeStatistics depth
+        uint64_t start_attempts
+        uint64_t successful_starts
+        uint64_t stop_calls
+        uint64_t disconnect_events
+        uint64_t transfer_stall_events
+
+    cdef cppclass NativeCalibrationData "libfreenect2::CalibrationData":
+        pass
 
     cdef cppclass NativeDevice "libfreenect2::Freenect2Device":
         cppclass ColorCameraParams:
@@ -141,6 +263,9 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
         string getPacketPipelineName() except +
         NativeDeviceState getState() except + nogil const
         string getLastError() except + nogil const
+        NativeDeviceRuntimeStatistics getRuntimeStatistics() except + nogil const
+        bool getCalibrationData(NativeCalibrationData &) except + nogil const
+        bool getCalibrationProfile(NativeCalibrationProfile &) except + nogil const
         ColorCameraParams getColorCameraParams() except +
         IrCameraParams getIrCameraParams() except +
         void setColorCameraParams(const ColorCameraParams &) except + nogil
@@ -182,12 +307,58 @@ cdef extern from "libfreenect2/libfreenect2.hpp" namespace "libfreenect2":
         vector[float] z_table
         vector[short] lookup_table
 
+    cdef cppclass NativeReplayOptions "libfreenect2::ReplayOptions":
+        NativeReplayOptions() except +
+        bool salvage_incomplete
+        bool reproduce_timing
+
     cdef cppclass NativeReplay "libfreenect2::Freenect2Replay":
         NativeReplay() except +
         NativeDevice *openDevice(const vector[string] &) except + nogil
         NativeDevice *openDevice(const vector[string] &, const NativePacketPipeline *) except + nogil
         NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &) except + nogil
         NativeDevice *openDevice(const vector[string] &, const ReplayCalibration &, const NativePacketPipeline *) except + nogil
+        NativeDevice *openRecording(const string &, const NativeReplayOptions &) except + nogil
+        NativeDevice *openRecording(const string &, const NativePacketPipeline *, const NativeReplayOptions &) except + nogil
+
+cdef extern from "libfreenect2/projective_registration.h" namespace "libfreenect2":
+    cdef enum NativeRegistrationRasterization "libfreenect2::RegistrationRasterization":
+        RASTERIZATION_NEAREST "libfreenect2::RegistrationRasterization::Nearest"
+        RASTERIZATION_FOUR_NEIGHBOR "libfreenect2::RegistrationRasterization::FourNeighborSplat"
+
+    cdef cppclass NativeProjectiveRegistrationOptions "libfreenect2::ProjectiveRegistrationOptions":
+        NativeProjectiveRegistrationOptions() except +
+        NativeRegistrationRasterization rasterization
+        float min_depth_mm
+        float max_depth_mm
+        bool apply_depth_correction
+
+    cdef cppclass NativeProjectiveRegistration "libfreenect2::ProjectiveRegistration":
+        @staticmethod
+        unique_ptr[NativeProjectiveRegistration] create(
+            const NativeCalibrationProfile &, const NativeProjectiveCameraModel &,
+            const NativeProjectiveRegistrationOptions &, string *
+        ) except + nogil
+        const NativeProjectiveCameraModel &targetCamera() except + nogil const
+        const NativeProjectiveRegistrationOptions &options() except + nogil const
+        bool apply(const NativeFrame &, NativeFrame &, string *) except + nogil const
+
+cdef extern from "libfreenect2/recording.h" namespace "libfreenect2":
+    cdef cppclass NativeRecordingWriter "libfreenect2::RecordingWriter"(NativeFrameListener):
+        cppclass Stats:
+            Stats() except +
+            uint64_t written_frames
+            uint64_t written_color_frames
+            uint64_t written_depth_frames
+            uint64_t dropped_frames
+            uint64_t written_bytes
+        NativeRecordingWriter(const string &, size_t) except +
+        bool setCalibration(const string &, const string &, const NativeCalibrationData &) except + nogil
+        bool setCalibrationProfile(const NativeCalibrationProfile &, bool) except + nogil
+        bool close() except + nogil
+        bool isOpen() except + nogil const
+        string getLastError() except + nogil const
+        Stats getStats() except + nogil const
 
 cdef extern from "libfreenect2/registration.h" namespace "libfreenect2":
     cdef cppclass NativeRegistration "libfreenect2::Registration":

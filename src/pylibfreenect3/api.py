@@ -4,7 +4,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from math import isfinite
 from os import PathLike, fspath
-from typing import ClassVar, cast, overload
+from typing import TYPE_CHECKING, ClassVar, cast, overload
 from warnings import warn
 
 import numpy as np
@@ -26,6 +26,7 @@ from .types import (
     ColorSettingCommand,
     DepthSearchOptions,
     DeviceConfig,
+    DeviceRuntimeStats,
     DeviceState,
     FrameFormat,
     FrameType,
@@ -35,9 +36,14 @@ from .types import (
     PacketPipelineConfig,
     Pipeline,
     ReplayCalibration,
+    ReplayOptions,
     Stream,
+    StreamRuntimeStats,
     _dataclass_from_mapping,
 )
+
+if TYPE_CHECKING:
+    from .calibration import CalibrationProfile
 
 __all__ = [
     "AlignedFrameListener",
@@ -82,6 +88,7 @@ type _FrameArray = npt.NDArray[np.uint8] | npt.NDArray[np.float32]
 
 _DEFAULT_ALIGNMENT_CONFIG = AlignmentConfig()
 _DEFAULT_DEPTH_SEARCH_OPTIONS = DepthSearchOptions()
+_DEFAULT_REPLAY_OPTIONS = ReplayOptions()
 
 
 def core_version() -> str:
@@ -247,7 +254,7 @@ class Frame:
         bytes_per_pixel: int,
         *,
         frame_type: FrameType | None = None,
-        frame_format: FrameFormat = FrameFormat.INVALID,
+        frame_format: FrameFormat,
         timestamp: int = 0,
         arrival_timestamp_us: int = 0,
         sequence: int = 0,
@@ -256,6 +263,12 @@ class Frame:
         gamma: float = 0.0,
         status: int = 0,
     ) -> Frame:
+        try:
+            frame_format = FrameFormat(frame_format)
+        except ValueError as error:
+            raise ValueError("frame_format must be a concrete FrameFormat") from error
+        if frame_format is FrameFormat.INVALID:
+            raise ValueError("frame_format must be a concrete FrameFormat")
         if width <= 0 or height <= 0 or bytes_per_pixel <= 0:
             raise ValueError("frame dimensions and bytes_per_pixel must be positive")
         expected_bpp = {
@@ -324,6 +337,13 @@ class Frame:
                 raise ValueError(
                     "cannot infer a libfreenect2 frame format from this array"
                 )
+        else:
+            try:
+                frame_format = FrameFormat(frame_format)
+            except ValueError as error:
+                raise ValueError(
+                    "frame_format must be a concrete FrameFormat"
+                ) from error
         expected = {
             FrameFormat.RAW: (np.dtype(np.uint8), 1),
             FrameFormat.FLOAT: (np.dtype(np.float32), 2),
@@ -758,6 +778,27 @@ class Device:
     def last_error(self) -> str:
         return self._native.last_error
 
+    @property
+    def runtime_stats(self) -> DeviceRuntimeStats:
+        values = self._native.runtime_statistics()
+        return DeviceRuntimeStats(
+            color=_dataclass_from_mapping(StreamRuntimeStats, values["color"]),
+            ir=_dataclass_from_mapping(StreamRuntimeStats, values["ir"]),
+            depth=_dataclass_from_mapping(StreamRuntimeStats, values["depth"]),
+            start_attempts=values["start_attempts"],
+            successful_starts=values["successful_starts"],
+            stop_calls=values["stop_calls"],
+            disconnect_events=values["disconnect_events"],
+            transfer_stall_events=values["transfer_stall_events"],
+        )
+
+    @property
+    def calibration_profile(self) -> CalibrationProfile | None:
+        from .calibration import CalibrationProfile
+
+        native = self._native.calibration_profile()
+        return None if native is None else CalibrationProfile._from_native(native)
+
 
 class Context:
     VENDOR_ID = 0x045E
@@ -826,6 +867,27 @@ class ReplayContext:
             )
         except DeviceOpenError as error:
             raise ReplayError("libfreenect2 could not open the replay input") from error
+        return Device(native, selected)
+
+    def open_recording(
+        self,
+        path: str | PathLike[str],
+        *,
+        replay_options: ReplayOptions = _DEFAULT_REPLAY_OPTIONS,
+        pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
+        pipeline_config: PacketPipelineConfig | None = None,
+    ) -> Device:
+        selected = _coerce_pipeline(pipeline, pipeline_config)
+        try:
+            native = self._native.open_recording(
+                fspath(path),
+                replay_options,
+                None if selected is None else selected._native,
+            )
+        except DeviceOpenError as error:
+            raise ReplayError(
+                "libfreenect2 could not open the canonical recording"
+            ) from error
         return Device(native, selected)
 
 
@@ -1182,16 +1244,14 @@ class Camera:
         pipeline: str | Pipeline | PacketPipeline | None = Pipeline.AUTO,
         pipeline_config: PacketPipelineConfig | None = None,
         alignment: AlignmentConfig | None = None,
-        streams: Iterable[str | Stream] | None = None,
+        streams: Iterable[str | Stream] = (Stream.COLOR, Stream.DEPTH),
+        replay_options: ReplayOptions = _DEFAULT_REPLAY_OPTIONS,
     ) -> Camera:
-        from .recording import RecordingBundle
-
-        bundle = RecordingBundle.open(path)
-        names = cls._normalize_streams(bundle.streams if streams is None else streams)
+        names = cls._normalize_streams(streams)
         context = ReplayContext()
-        opened = context.open_device(
-            bundle.frame_paths(names),
-            calibration=bundle.calibration,
+        opened = context.open_recording(
+            path,
+            replay_options=replay_options,
             pipeline=pipeline,
             pipeline_config=pipeline_config,
         )
@@ -1256,6 +1316,14 @@ class Camera:
         if isinstance(self.listener, AlignedFrameListener):
             return self.listener.alignment_stats
         return None
+
+    @property
+    def runtime_stats(self) -> DeviceRuntimeStats:
+        return self.device.runtime_stats
+
+    @property
+    def calibration_profile(self) -> CalibrationProfile | None:
+        return self.device.calibration_profile
 
     def capture(self, *, timeout: float | None = 2.0, copy: bool = False) -> FrameSet:
         if self._closed:

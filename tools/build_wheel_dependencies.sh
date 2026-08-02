@@ -23,8 +23,8 @@ turbojpeg_sha256=6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878
 
 if [[ ${PYLIBF3_REQUIRE_CORE_TAG:-0} == 1 ]]; then
   core_tag=$(git -C "$core_source" describe --tags --exact-match)
-  if [[ $core_tag != v0.3.0 ]]; then
-    echo "release wheels require libfreenect2-metal tag v0.3.0; found $core_tag" >&2
+  if [[ $core_tag != v0.4.0 ]]; then
+    echo "release wheels require libfreenect2-metal tag v0.4.0; found $core_tag" >&2
     exit 1
   fi
 fi
@@ -110,6 +110,7 @@ core_options=(
   "-DCMAKE_PREFIX_PATH=$wheel_prefix"
   -DCMAKE_BUILD_TYPE=Release
   -DBUILD_EXAMPLES=OFF
+  -DBUILD_CALIBRATION_TOOLS=OFF
   -DBUILD_OPENNI2_DRIVER=OFF
   -DBUILD_STREAMER_RECORDER=OFF
   -DBUILD_TESTING=OFF

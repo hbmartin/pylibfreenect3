@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 FORBIDDEN_PREFIXES = ("/opt/homebrew", "/usr/local", "/private/tmp", "/tmp/")
+FORBIDDEN_DEPENDENCY_NAMES = ("opencv",)
 LICENSE_NAMES = {
     "libfreenect2-APACHE20.txt",
     "libfreenect2-CONTRIB.txt",
@@ -30,6 +31,8 @@ def run(command: list[str]) -> str:
 
 def verify_macos(binary: Path) -> None:
     output = run(["otool", "-L", str(binary)])
+    if any(name in output.lower() for name in FORBIDDEN_DEPENDENCY_NAMES):
+        raise RuntimeError(f"forbidden dependency in {binary}:\n{output}")
     lines = output.splitlines()[1:]
     if binary.suffix == ".dylib":
         install_name = lines.pop(0).strip().split(" ", 1)[0]
@@ -47,6 +50,8 @@ def verify_macos(binary: Path) -> None:
 
 def verify_linux(binary: Path) -> None:
     output = run(["ldd", str(binary)])
+    if any(name in output.lower() for name in FORBIDDEN_DEPENDENCY_NAMES):
+        raise RuntimeError(f"forbidden dependency in {binary}:\n{output}")
     if "not found" in output:
         raise RuntimeError(f"unresolved Linux dependency in {binary}:\n{output}")
     for forbidden in FORBIDDEN_PREFIXES:
@@ -59,6 +64,15 @@ def verify_linux(binary: Path) -> None:
 def verify(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
+        forbidden_dependencies = [
+            name
+            for name in names
+            if any(value in name.lower() for value in FORBIDDEN_DEPENDENCY_NAMES)
+        ]
+        if forbidden_dependencies:
+            raise RuntimeError(
+                f"wheel contains forbidden dependencies: {forbidden_dependencies}"
+            )
         package_names = {
             name.removeprefix("pylibfreenect3/")
             for name in names
@@ -68,7 +82,9 @@ def verify(wheel: Path) -> None:
             "__init__.py",
             "_native.pyi",
             "api.py",
+            "calibration.py",
             "errors.py",
+            "legacy.py",
             "lowlevel.py",
             "py.typed",
             "recording.py",

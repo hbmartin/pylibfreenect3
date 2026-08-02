@@ -69,8 +69,8 @@ def test_native_resources_fail_fast_when_inherited_after_fork() -> None:
 
 
 def test_runtime_identity_and_pipeline_queries() -> None:
-    assert f3.core_version().startswith("0.3.")
-    assert f3.core_api_version() == 3
+    assert f3.core_version().startswith("0.4.")
+    assert f3.core_api_version() == 4
     assert f3.core_build_revision()
     assert {"cpu", "dump"} <= f3.compiled_pipelines()
     assert f3.available_pipelines() <= f3.compiled_pipelines()
@@ -330,8 +330,12 @@ def test_frame_numpy_protocol_honors_dtype_and_copy() -> None:
 
 
 def test_mismatched_array_layouts_are_rejected() -> None:
+    with pytest.raises(TypeError, match="frame_format"):
+        f3.Frame.allocate(2, 2, 4)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="dimensions"):
-        f3.Frame.allocate(0, 2, 4)
+        f3.Frame.allocate(0, 2, 4, frame_format=f3.FrameFormat.FLOAT)
+    with pytest.raises(ValueError, match="concrete FrameFormat"):
+        f3.Frame.allocate(2, 2, 4, frame_format=f3.FrameFormat.INVALID)
     with pytest.raises(ValueError, match="FLOAT frames require 4"):
         f3.Frame.allocate(2, 2, 1, frame_format=f3.FrameFormat.FLOAT)
     with pytest.raises(ValueError, match="exactly one FrameType"):
@@ -340,6 +344,7 @@ def test_mismatched_array_layouts_are_rejected() -> None:
             2,
             4,
             frame_type=f3.FrameType.COLOR | f3.FrameType.DEPTH,
+            frame_format=f3.FrameFormat.FLOAT,
         )
     with pytest.raises(ValueError, match="array layout does not match FLOAT"):
         f3.Frame.from_array(

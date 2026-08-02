@@ -1,11 +1,12 @@
-# pylibfreenect3 1.0
+# pylibfreenect3 2.0
 
 Typed, ownership-safe Python bindings for
-[libfreenect2-metal](https://github.com/hbmartin/libfreenect2-metal) 0.3.
+[libfreenect2-metal](https://github.com/hbmartin/libfreenect2-metal) 0.4.
 
 `pylibfreenect3` provides a small high-level camera API, explicit low-level
-lifecycle primitives, safe zero-copy NumPy views, camera registration, and
-checksummed recording and replay.
+lifecycle primitives, safe zero-copy NumPy views, camera and projective
+registration, calibration profiles, runtime statistics, and canonical
+recording and replay.
 
 ## Start here
 

@@ -7,7 +7,7 @@ find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module NumP
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(Cython 3.2.8 REQUIRED)
 include(UseCython)
-find_package(Freenect2 0.3 REQUIRED)
+find_package(Freenect2 0.4 REQUIRED)
 
 Cython_transpile(
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pylibfreenect3/_native.pyx"

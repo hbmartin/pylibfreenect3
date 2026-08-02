@@ -6,6 +6,7 @@ from cython.operator cimport dereference as deref, preincrement as inc
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 from libc.string cimport memcpy, memset
 from libcpp.map cimport map
+from libcpp.memory cimport unique_ptr
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -20,9 +21,11 @@ cimport numpy as cnp
 from . cimport libfreenect2 as lf
 from .errors import (
     BackendUnavailableError,
+    CalibrationError,
     DeviceOpenError,
     DeviceStateError,
     FrameTimeoutError,
+    RecordingError,
 )
 
 cnp.import_array()
@@ -103,6 +106,80 @@ cdef void _fill_ir(lf.NativeDevice.IrCameraParams *target, object source):
     target.k3 = source.k3
     target.p1 = source.p1
     target.p2 = source.p2
+
+
+cdef int _distortion_model(object value) except -1:
+    cdef str name = str(value)
+    if name == "none":
+        return <int>lf.DISTORTION_NONE
+    if name == "brown_conrady_5":
+        return <int>lf.DISTORTION_BROWN_CONRADY_5
+    if name == "rational_8":
+        return <int>lf.DISTORTION_RATIONAL_8
+    raise ValueError(f"unknown distortion model: {value!r}")
+
+
+cdef str _distortion_name(lf.NativeDistortionModel value):
+    if value == lf.DISTORTION_NONE:
+        return "none"
+    if value == lf.DISTORTION_BROWN_CONRADY_5:
+        return "brown_conrady_5"
+    if value == lf.DISTORTION_RATIONAL_8:
+        return "rational_8"
+    raise ValueError(f"unknown native distortion model: {<int>value}")
+
+
+cdef void _fill_projective_camera(lf.NativeProjectiveCameraModel *target, object source):
+    cdef size_t index
+    target.width = source.width
+    target.height = source.height
+    target.fx = source.fx
+    target.fy = source.fy
+    target.cx = source.cx
+    target.cy = source.cy
+    target.distortion_model = <lf.NativeDistortionModel>_distortion_model(source.distortion_model)
+    for index in range(8):
+        lf.setCameraDistortion(
+            deref(target), index,
+            source.distortion[index] if index < len(source.distortion) else 0.0
+        )
+
+
+cdef dict _projective_camera_mapping(lf.NativeProjectiveCameraModel value):
+    cdef size_t count = 0
+    cdef size_t index
+    if value.distortion_model == lf.DISTORTION_BROWN_CONRADY_5:
+        count = 5
+    elif value.distortion_model == lf.DISTORTION_RATIONAL_8:
+        count = 8
+    return {
+        "width": value.width,
+        "height": value.height,
+        "fx": value.fx,
+        "fy": value.fy,
+        "cx": value.cx,
+        "cy": value.cy,
+        "distortion_model": _distortion_name(value.distortion_model),
+        "distortion": tuple(lf.cameraDistortion(value, index) for index in range(count)),
+    }
+
+
+def scale_projective_camera_model(model, uint32_t width, uint32_t height):
+    cdef lf.NativeProjectiveCameraModel native
+    cdef lf.NativeProjectiveCameraModel scaled
+    _fill_projective_camera(&native, model)
+    with nogil:
+        scaled = native.scaledTo(width, height)
+    return _projective_camera_mapping(scaled)
+
+
+def rectify_projective_camera_model(model):
+    cdef lf.NativeProjectiveCameraModel native
+    cdef lf.NativeProjectiveCameraModel rectified
+    _fill_projective_camera(&native, model)
+    with nogil:
+        rectified = native.rectified()
+    return _projective_camera_mapping(rectified)
 
 
 def core_version():
@@ -258,6 +335,9 @@ cdef class NativePipeline:
 cdef class NativeFrameSet
 cdef class NativeSyncFrameListener
 cdef class NativeAlignedFrameListener
+cdef class NativeCalibrationProfileHandle
+cdef class NativeProjectiveRegistrationHandle
+cdef class NativeRecordingWriterHandle
 
 
 cdef class NativeFrame:
@@ -292,12 +372,13 @@ cdef class NativeFrame:
                  float exposure=0.0, float gain=0.0, float gamma=0.0,
                  uint32_t status=0):
         cdef NativeFrame result = NativeFrame()
-        result.ptr = new lf.NativeFrame(width, height, bytes_per_pixel, NULL)
+        result.ptr = new lf.NativeFrame(
+            width, height, bytes_per_pixel, NULL, <lf.NativeFrameFormat>frame_format
+        )
         result.owns_ptr = True
         if result.ptr.data != NULL:
             memset(result.ptr.data, 0, width * height * bytes_per_pixel)
         result.frame_type = frame_type
-        result.ptr.format = <lf.NativeFrameFormat>frame_format
         result.ptr.timestamp = timestamp
         result.ptr.arrival_timestamp_us = arrival_timestamp_us
         result.ptr.sequence = sequence
@@ -350,8 +431,10 @@ cdef class NativeFrame:
         else:
             raise ValueError("expected a 1-D raw, 2-D scalar, or (H, W, 4) color array")
         cdef NativeFrame result = NativeFrame()
-        result.ptr = new lf.NativeFrame(width, height, bpp, <unsigned char *>cnp.PyArray_DATA(value))
-        result.ptr.format = <lf.NativeFrameFormat>frame_format
+        result.ptr = new lf.NativeFrame(
+            width, height, bpp, <unsigned char *>cnp.PyArray_DATA(value),
+            <lf.NativeFrameFormat>frame_format
+        )
         result.owns_ptr = True
         result.numpy_owner = value
         result.frame_type = frame_type
@@ -498,7 +581,7 @@ cdef NativeFrame _borrow_frame(lf.NativeFrame *ptr, int frame_type, NativeFrameS
 
 cdef lf.NativeFrame *_copy_frame(lf.NativeFrame *source) except NULL:
     cdef lf.NativeFrame *result = new lf.NativeFrame(
-        source.width, source.height, source.bytes_per_pixel, NULL
+        source.width, source.height, source.bytes_per_pixel, NULL, source.format
     )
     cdef size_t data_size = source.width * source.height * source.bytes_per_pixel
     if data_size:
@@ -510,7 +593,6 @@ cdef lf.NativeFrame *_copy_frame(lf.NativeFrame *source) except NULL:
     result.gain = source.gain
     result.gamma = source.gamma
     result.status = source.status
-    result.format = source.format
     return result
 
 
@@ -624,13 +706,15 @@ cdef class NativeFrameSet:
 def _testing_frame_set():
     """Build a tiny owned native set for hardware-free lifetime tests."""
     cdef NativeFrameSet result = NativeFrameSet()
-    cdef lf.NativeFrame *color = new lf.NativeFrame(2, 1, 4, NULL)
-    cdef lf.NativeFrame *depth = new lf.NativeFrame(2, 1, 4, NULL)
-    color.format = lf.FORMAT_BGRX
+    cdef lf.NativeFrame *color = new lf.NativeFrame(
+        2, 1, 4, NULL, lf.FORMAT_BGRX
+    )
+    cdef lf.NativeFrame *depth = new lf.NativeFrame(
+        2, 1, 4, NULL, lf.FORMAT_FLOAT
+    )
     color.timestamp = 10
     color.arrival_timestamp_us = 1000
     color.sequence = 1
-    depth.format = lf.FORMAT_FLOAT
     depth.timestamp = 11
     depth.arrival_timestamp_us = 1100
     depth.sequence = 2
@@ -817,7 +901,241 @@ cdef lf.NativeFrameListener *_listener_pointer(object listener) except NULL:
     if isinstance(listener, NativeAlignedFrameListener):
         _require_process((<NativeAlignedFrameListener>listener).owner_pid)
         return <lf.NativeFrameListener *>(<NativeAlignedFrameListener>listener).ptr
+    if isinstance(listener, NativeRecordingWriterHandle):
+        _require_process((<NativeRecordingWriterHandle>listener).owner_pid)
+        return <lf.NativeFrameListener *>(<NativeRecordingWriterHandle>listener).ptr
     raise TypeError("listener must be a native frame listener")
+
+
+cdef str _depth_correction_name(lf.NativeDepthCorrectionModel value):
+    if value == lf.DEPTH_CORRECTION_OFFSET:
+        return "offset_only"
+    if value == lf.DEPTH_CORRECTION_LINEAR:
+        return "linear"
+    raise ValueError(f"unknown native depth correction model: {<int>value}")
+
+
+cdef dict _rigid_transform_mapping(lf.NativeRigidTransform value):
+    cdef size_t index
+    return {
+        "rotation": tuple(lf.rigidRotation(value, index) for index in range(9)),
+        "translation_m": tuple(lf.rigidTranslation(value, index) for index in range(3)),
+    }
+
+
+cdef dict _depth_correction_mapping(lf.NativeDepthCorrectionProfile value):
+    return {
+        "model": _depth_correction_name(value.model),
+        "scale": value.scale,
+        "offset_mm": value.offset_mm,
+        "rmse_mm": value.rmse_mm,
+    }
+
+
+cdef dict _quality_mapping(lf.NativeCalibrationQualityMetrics value):
+    return {
+        "color_views": value.color_views,
+        "ir_views": value.ir_views,
+        "stereo_views": value.stereo_views,
+        "depth_views": value.depth_views,
+        "color_rms_px": value.color_rms_px,
+        "ir_rms_px": value.ir_rms_px,
+        "held_out_stereo_rms_px": value.held_out_stereo_rms_px,
+        "depth_rmse_mm": value.depth_rmse_mm,
+    }
+
+
+cdef class NativeCalibrationProfileHandle:
+    cdef lf.NativeCalibrationProfile *ptr
+    cdef long owner_pid
+
+    def __cinit__(self):
+        self.owner_pid = c_getpid()
+        self.ptr = new lf.NativeCalibrationProfile()
+
+    def __dealloc__(self):
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
+            del self.ptr
+        self.ptr = NULL
+
+    cdef void _check(self) except *:
+        _require_process(self.owner_pid)
+        if self.ptr == NULL:
+            raise CalibrationError("calibration profile is no longer valid")
+
+    @staticmethod
+    def load(path):
+        cdef NativeCalibrationProfileHandle result = NativeCalibrationProfileHandle()
+        cdef string encoded = str(path).encode("utf-8")
+        cdef string error
+        cdef bint ok
+        with nogil:
+            ok = lf.NativeCalibrationProfile.load(encoded, deref(result.ptr), &error)
+        if not ok:
+            raise CalibrationError(_text(error))
+        return result
+
+    def save(self, path):
+        self._check()
+        cdef string encoded = str(path).encode("utf-8")
+        cdef string error
+        cdef bint ok
+        with nogil:
+            ok = self.ptr.save(encoded, &error)
+        if not ok:
+            raise CalibrationError(_text(error))
+
+    def check_device(self, serial, firmware, bint allow_serial_mismatch=False):
+        self._check()
+        cdef string encoded_serial = str(serial).encode("utf-8")
+        cdef string encoded_firmware = str(firmware).encode("utf-8")
+        cdef string warning
+        cdef string error
+        cdef bint ok
+        with nogil:
+            ok = self.ptr.matchesDevice(
+                encoded_serial, encoded_firmware, allow_serial_mismatch, &warning, &error
+            )
+        if not ok:
+            raise CalibrationError(_text(error))
+        return _text(warning) or None
+
+    @property
+    def schema_version(self):
+        self._check()
+        return self.ptr.schemaVersion()
+
+    @property
+    def serial(self):
+        self._check()
+        return _text(self.ptr.serial())
+
+    @property
+    def firmware(self):
+        self._check()
+        return _text(self.ptr.firmware())
+
+    def color_camera(self):
+        self._check()
+        cdef lf.NativeProjectiveCameraModel value = self.ptr.colorCamera()
+        return _projective_camera_mapping(value)
+
+    def ir_camera(self):
+        self._check()
+        cdef lf.NativeProjectiveCameraModel value = self.ptr.irCamera()
+        return _projective_camera_mapping(value)
+
+    def depth_to_color(self):
+        self._check()
+        cdef lf.NativeRigidTransform value = self.ptr.depthToColor()
+        return _rigid_transform_mapping(value)
+
+    def depth_correction(self):
+        self._check()
+        if not self.ptr.hasDepthCorrection():
+            return None
+        cdef lf.NativeDepthCorrectionProfile value = self.ptr.depthCorrection()
+        return _depth_correction_mapping(value)
+
+    def quality_metrics(self):
+        self._check()
+        if not self.ptr.hasQualityMetrics():
+            return None
+        cdef lf.NativeCalibrationQualityMetrics value = self.ptr.qualityMetrics()
+        return _quality_mapping(value)
+
+    def provenance(self):
+        self._check()
+        return {
+            "created_utc": _text(self.ptr.createdUtc()),
+            "tool_version": _text(self.ptr.toolVersion()),
+            "job_sha256": _text(self.ptr.jobSha256()),
+        }
+
+
+cdef int _rasterization(object value) except -1:
+    cdef str name = str(value)
+    if name == "nearest":
+        return <int>lf.RASTERIZATION_NEAREST
+    if name == "four_neighbor_splat":
+        return <int>lf.RASTERIZATION_FOUR_NEIGHBOR
+    raise ValueError(f"unknown registration rasterization: {value!r}")
+
+
+cdef str _rasterization_name(lf.NativeRegistrationRasterization value):
+    if value == lf.RASTERIZATION_NEAREST:
+        return "nearest"
+    if value == lf.RASTERIZATION_FOUR_NEIGHBOR:
+        return "four_neighbor_splat"
+    raise ValueError(f"unknown native registration rasterization: {<int>value}")
+
+
+cdef dict _projective_options_mapping(lf.NativeProjectiveRegistrationOptions value):
+    return {
+        "rasterization": _rasterization_name(value.rasterization),
+        "min_depth_mm": value.min_depth_mm,
+        "max_depth_mm": value.max_depth_mm,
+        "apply_depth_correction": value.apply_depth_correction != 0,
+    }
+
+
+cdef class NativeProjectiveRegistrationHandle:
+    cdef lf.NativeProjectiveRegistration *ptr
+    cdef long owner_pid
+
+    def __cinit__(self, NativeCalibrationProfileHandle profile not None, target, options):
+        profile._check()
+        self.owner_pid = c_getpid()
+        self.ptr = NULL
+        cdef lf.NativeProjectiveCameraModel native_target
+        cdef lf.NativeProjectiveRegistrationOptions native_options
+        cdef string error
+        cdef unique_ptr[lf.NativeProjectiveRegistration] created
+        _fill_projective_camera(&native_target, target)
+        native_options.rasterization = (
+            <lf.NativeRegistrationRasterization>_rasterization(options.rasterization)
+        )
+        native_options.min_depth_mm = options.min_depth_mm
+        native_options.max_depth_mm = options.max_depth_mm
+        native_options.apply_depth_correction = options.apply_depth_correction
+        with nogil:
+            created = lf.NativeProjectiveRegistration.create(
+                deref(profile.ptr), native_target, native_options, &error
+            )
+        if created.get() == NULL:
+            raise CalibrationError(_text(error))
+        self.ptr = created.release()
+
+    def __dealloc__(self):
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
+            del self.ptr
+        self.ptr = NULL
+
+    cdef void _check(self) except *:
+        _require_process(self.owner_pid)
+        if self.ptr == NULL:
+            raise DeviceStateError("projective registration is no longer valid")
+
+    def target_camera(self):
+        self._check()
+        cdef lf.NativeProjectiveCameraModel value = self.ptr.targetCamera()
+        return _projective_camera_mapping(value)
+
+    def options(self):
+        self._check()
+        cdef lf.NativeProjectiveRegistrationOptions value = self.ptr.options()
+        return _projective_options_mapping(value)
+
+    def apply(self, NativeFrame depth not None, NativeFrame output not None):
+        self._check()
+        depth._check()
+        output._check()
+        cdef string error
+        cdef bint ok
+        with nogil:
+            ok = self.ptr.apply(deref(depth.ptr), deref(output.ptr), &error)
+        if not ok:
+            raise ValueError(_text(error))
 
 
 cdef class NativeDeviceHandle:
@@ -899,6 +1217,51 @@ cdef class NativeDeviceHandle:
         with nogil:
             value = self.ptr.getLastError()
         return _text(value)
+
+    def runtime_statistics(self):
+        self._check()
+        cdef lf.NativeDeviceRuntimeStatistics value
+        with nogil:
+            value = self.ptr.getRuntimeStatistics()
+        return {
+            "color": {
+                "decoded_frames": value.color.decoded_frames,
+                "status_error_frames": value.color.status_error_frames,
+                "sequence_gaps": value.color.sequence_gaps,
+                "last_sequence": value.color.last_sequence,
+                "last_device_timestamp": value.color.last_device_timestamp,
+                "last_arrival_timestamp_us": value.color.last_arrival_timestamp_us,
+            },
+            "ir": {
+                "decoded_frames": value.ir.decoded_frames,
+                "status_error_frames": value.ir.status_error_frames,
+                "sequence_gaps": value.ir.sequence_gaps,
+                "last_sequence": value.ir.last_sequence,
+                "last_device_timestamp": value.ir.last_device_timestamp,
+                "last_arrival_timestamp_us": value.ir.last_arrival_timestamp_us,
+            },
+            "depth": {
+                "decoded_frames": value.depth.decoded_frames,
+                "status_error_frames": value.depth.status_error_frames,
+                "sequence_gaps": value.depth.sequence_gaps,
+                "last_sequence": value.depth.last_sequence,
+                "last_device_timestamp": value.depth.last_device_timestamp,
+                "last_arrival_timestamp_us": value.depth.last_arrival_timestamp_us,
+            },
+            "start_attempts": value.start_attempts,
+            "successful_starts": value.successful_starts,
+            "stop_calls": value.stop_calls,
+            "disconnect_events": value.disconnect_events,
+            "transfer_stall_events": value.transfer_stall_events,
+        }
+
+    def calibration_profile(self):
+        self._check()
+        cdef NativeCalibrationProfileHandle result = NativeCalibrationProfileHandle()
+        cdef bint available
+        with nogil:
+            available = self.ptr.getCalibrationProfile(deref(result.ptr))
+        return result if available else None
 
     def color_camera_params(self):
         self._check()
@@ -1115,6 +1478,105 @@ cdef NativeDeviceHandle _wrap_device(lf.NativeDevice *ptr, object owner, NativeP
     return result
 
 
+cdef class NativeRecordingWriterHandle:
+    cdef lf.NativeRecordingWriter *ptr
+    cdef long owner_pid
+
+    def __cinit__(self, path, size_t queue_capacity=32):
+        cdef string encoded = str(path).encode("utf-8")
+        cdef string error
+        self.owner_pid = c_getpid()
+        self.ptr = NULL
+        self.ptr = new lf.NativeRecordingWriter(encoded, queue_capacity)
+        if not self.ptr.isOpen():
+            error = self.ptr.getLastError()
+            del self.ptr
+            self.ptr = NULL
+            raise RecordingError(_text(error))
+
+    def __dealloc__(self):
+        if self.owner_pid == c_getpid() and self.ptr != NULL:
+            del self.ptr
+        self.ptr = NULL
+
+    cdef void _check(self) except *:
+        _require_process(self.owner_pid)
+        if self.ptr == NULL:
+            raise RecordingError("recording writer is no longer valid")
+
+    @property
+    def _listener_address(self):
+        self._check()
+        return <size_t><lf.NativeFrameListener *>self.ptr
+
+    @property
+    def is_open(self):
+        self._check()
+        cdef bint value
+        with nogil:
+            value = self.ptr.isOpen()
+        return value != 0
+
+    @property
+    def last_error(self):
+        self._check()
+        cdef string value
+        with nogil:
+            value = self.ptr.getLastError()
+        return _text(value)
+
+    def publish_calibration(self, NativeDeviceHandle device not None):
+        self._check()
+        device._check()
+        cdef lf.NativeCalibrationData calibration
+        cdef string serial = device.ptr.getSerialNumber()
+        cdef string firmware = device.ptr.getFirmwareVersion()
+        cdef bint ok
+        with nogil:
+            ok = device.ptr.getCalibrationData(calibration)
+        if not ok:
+            raise RecordingError("device calibration is not available")
+        with nogil:
+            ok = self.ptr.setCalibration(serial, firmware, calibration)
+        if not ok:
+            raise RecordingError(self.last_error)
+
+    def set_calibration_profile(
+        self, NativeCalibrationProfileHandle profile not None,
+        bint allow_serial_mismatch=False
+    ):
+        self._check()
+        profile._check()
+        cdef bint ok
+        with nogil:
+            ok = self.ptr.setCalibrationProfile(
+                deref(profile.ptr), allow_serial_mismatch
+            )
+        if not ok:
+            raise CalibrationError(self.last_error)
+
+    def statistics(self):
+        self._check()
+        cdef lf.NativeRecordingWriter.Stats value
+        with nogil:
+            value = self.ptr.getStats()
+        return {
+            "written_frames": value.written_frames,
+            "written_color_frames": value.written_color_frames,
+            "written_depth_frames": value.written_depth_frames,
+            "dropped_frames": value.dropped_frames,
+            "written_bytes": value.written_bytes,
+        }
+
+    def close(self):
+        self._check()
+        cdef bint ok
+        with nogil:
+            ok = self.ptr.close()
+        if not ok:
+            raise RecordingError(self.last_error)
+
+
 cdef class NativeFreenect2Context:
     cdef lf.NativeFreenect2 *ptr
     cdef long owner_pid
@@ -1264,6 +1726,27 @@ cdef class NativeReplayContext:
                     device = self.ptr.openDevice(paths, native_calibration)
                 else:
                     device = self.ptr.openDevice(paths, native_calibration, native_pipeline)
+        return _wrap_device(device, self, pipeline)
+
+    def open_recording(self, path, options, NativePipeline pipeline=None):
+        _require_process(self.owner_pid)
+        cdef string directory = str(path).encode("utf-8")
+        if directory.empty():
+            raise DeviceOpenError("recording path must not be empty")
+        cdef lf.NativeReplayOptions native_options = lf.NativeReplayOptions()
+        native_options.salvage_incomplete = options.salvage_incomplete
+        native_options.reproduce_timing = options.reproduce_timing
+        cdef lf.NativePacketPipeline *native_pipeline = NULL
+        cdef lf.NativeDevice *device = NULL
+        if pipeline is not None:
+            native_pipeline = pipeline._consume()
+        with nogil:
+            if native_pipeline == NULL:
+                device = self.ptr.openRecording(directory, native_options)
+            else:
+                device = self.ptr.openRecording(
+                    directory, native_pipeline, native_options
+                )
         return _wrap_device(device, self, pipeline)
 
 
