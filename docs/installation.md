@@ -14,16 +14,28 @@ Linux wheel contains CPU, dump, TurboJPEG, and libusb support.
 
 ## Building from source
 
-Source builds require a compatible libfreenect2-metal 0.3.x shared library.
-The selected development install must contain the installed
-`libfreenect2/vision.h` API and matching symbols; configuration fails early
-with an upgrade instruction when an older 0.3 development snapshot is found.
+Source builds require a compatible libfreenect2-metal 0.4.x shared library and
+API 4. The selected development install must contain the installed vision,
+calibration-profile, projective-registration, and recording headers with
+matching symbols; configuration fails early when the core is incomplete or
+incompatible.
 Set `Freenect2_ROOT` when it is not discoverable through its CMake package,
 `pkg-config`, or a standard prefix:
 
 ```console
 Freenect2_ROOT=/opt/freenect2 uv build --wheel
 ```
+
+On macOS, install the native core from the `hbmartin` Homebrew tap:
+
+```console
+brew install hbmartin/tap/libfreenect2-metal
+export Freenect2_ROOT="$(brew --prefix libfreenect2-metal)"
+uv build --wheel
+```
+
+Use `brew install --HEAD hbmartin/tap/libfreenect2-metal` to build against the
+core's current development branch.
 
 The build uses scikit-build-core and CMake under `uv build`. It requires a
 C++17 compiler, Cython 3.2.8 or newer, and NumPy 2.2 or newer. An sdist does

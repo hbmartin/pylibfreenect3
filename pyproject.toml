@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pylibfreenect3"
-version = "1.0.0"
+version = "2.0.0"
 description = "Safe, modern Python bindings for libfreenect2-metal"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -129,6 +129,10 @@ pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["src/pylibfreenect3"]
 exclude = ["src/pylibfreenect3/_native.pyx", "src/pylibfreenect3/libfreenect2.pxd"]
+# Runtime validators intentionally accept bad values from untyped callers, and
+# package-internal wrappers share their native handles across focused modules.
+reportPrivateUsage = false
+reportUnnecessaryIsInstance = false
 
 [tool.cibuildwheel]
 build = ["cp312-*", "cp313-*", "cp314-*"]

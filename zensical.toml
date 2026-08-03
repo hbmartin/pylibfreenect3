@@ -13,6 +13,7 @@ nav = [
     { "Home" = "index.md" },
     { "Installation" = "installation.md" },
     { "Getting started" = "getstarted.md" },
+    { "Migrating to 2.0" = "migration-2.md" },
     { "OpenCV and registration" = "cookbook.md" },
     { "API Reference" = "api/index.md" },
     { "Development and releases" = "dev.md" },

@@ -101,18 +101,22 @@ find_package_handle_standard_args(
   REQUIRED_VARS Freenect2_INCLUDE_DIR Freenect2_LIBRARY Freenect2_VERSION
   VERSION_VAR Freenect2_VERSION
   REASON_FAILURE_MESSAGE
-    "Install libfreenect2-metal 0.3.x or set Freenect2_ROOT to its installation prefix."
+    "Install libfreenect2-metal 0.4.x or set Freenect2_ROOT to its installation prefix."
 )
 
 if(Freenect2_FOUND)
-  if(NOT Freenect2_VERSION MATCHES "^0\\.3\\.")
-    message(FATAL_ERROR "libfreenect2 0.3.x headers are required; found '${Freenect2_VERSION}'")
+  if(NOT Freenect2_VERSION MATCHES "^0\\.4\\.")
+    message(FATAL_ERROR "libfreenect2 0.4.x headers are required; found '${Freenect2_VERSION}'")
   endif()
 
-  if(NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/vision.h")
+  if(NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/vision.h" OR
+     NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/calibration_profile.h" OR
+     NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/projective_registration.h" OR
+     NOT EXISTS "${Freenect2_INCLUDE_DIR}/libfreenect2/recording.h")
     message(FATAL_ERROR
-      "This pylibfreenect3 source requires a recent libfreenect2-metal 0.3 "
-      "development install containing libfreenect2/vision.h. Rebuild and "
+      "This pylibfreenect3 source requires a complete libfreenect2-metal 0.4 "
+      "development install containing the vision, calibration-profile, "
+      "projective-registration, and recording APIs. Rebuild and "
       "install libfreenect2-metal from the pinned revision, then set "
       "Freenect2_ROOT to that prefix."
     )
@@ -122,24 +126,40 @@ if(Freenect2_FOUND)
   set(_Freenect2_probe "${CMAKE_CURRENT_BINARY_DIR}/freenect2_probe.cpp")
   file(WRITE "${_Freenect2_probe}" [=[
 #include <iostream>
+#include <libfreenect2/calibration_profile.h>
 #include <libfreenect2/libfreenect2.hpp>
+#include <libfreenect2/projective_registration.h>
+#include <libfreenect2/recording.h>
 #include <libfreenect2/vision.h>
 int main() {
   libfreenect2::vision::DepthSearchOptions options;
   options.primary_radius = 8;
   options.fallback_radius = 20;
   options.cluster_span_mm = 150.0f;
+  libfreenect2::Frame typed_frame(1, 1, 4, nullptr, libfreenect2::Frame::Float);
   // Reference each vision entry point without calling it: the probe must
   // prove declaration and linkage, not the core's null-argument behavior.
   volatile auto color_fn = &libfreenect2::vision::convertColorFrame;
   volatile auto map_fn = &libfreenect2::vision::buildColorToDepthMap;
   volatile auto depth_fn = &libfreenect2::vision::findDepthPixel;
   volatile auto lift_fn = &libfreenect2::vision::liftColorPoints;
-  volatile bool vision_linked = color_fn && map_fn && depth_fn && lift_fn;
+  volatile auto stats_fn = &libfreenect2::Freenect2Device::getRuntimeStatistics;
+  volatile auto profile_fn = &libfreenect2::Freenect2Device::getCalibrationProfile;
+  volatile auto profile_load_fn = &libfreenect2::CalibrationProfile::load;
+  volatile auto profile_save_fn = &libfreenect2::CalibrationProfile::save;
+  volatile auto projective_fn = &libfreenect2::ProjectiveRegistration::create;
+  volatile auto replay_fn = static_cast<libfreenect2::Freenect2Device*
+    (libfreenect2::Freenect2Replay::*)(const std::string&,
+      const libfreenect2::ReplayOptions&)>(&libfreenect2::Freenect2Replay::openRecording);
+  volatile auto writer_fn = &libfreenect2::RecordingWriter::getStats;
+  volatile bool v04_linked = color_fn && map_fn && depth_fn && lift_fn &&
+                             stats_fn && profile_fn && profile_load_fn &&
+                             profile_save_fn && projective_fn && replay_fn &&
+                             writer_fn && typed_frame.format == libfreenect2::Frame::Float;
   std::cout << libfreenect2::getVersion() << ";"
             << libfreenect2::getApiVersion() << ";"
             << libfreenect2::getBuildRevision() << ";"
-            << options.primary_radius << vision_linked;
+            << options.primary_radius << v04_linked;
   return 0;
 }
 ]=])
@@ -164,9 +184,9 @@ int main() {
   list(GET _Freenect2_probe_values 0 Freenect2_RUNTIME_VERSION)
   list(GET _Freenect2_probe_values 1 Freenect2_RUNTIME_API)
   list(GET _Freenect2_probe_values 2 Freenect2_BUILD_REVISION)
-  if(NOT Freenect2_RUNTIME_VERSION MATCHES "^0\\.3\\." OR NOT Freenect2_RUNTIME_API STREQUAL "3")
+  if(NOT Freenect2_RUNTIME_VERSION MATCHES "^0\\.4\\." OR NOT Freenect2_RUNTIME_API STREQUAL "4")
     message(FATAL_ERROR
-      "libfreenect2 runtime 0.3.x with API 3 is required; found "
+      "libfreenect2 runtime 0.4.x with API 4 is required; found "
       "${Freenect2_RUNTIME_VERSION} with API ${Freenect2_RUNTIME_API}"
     )
   endif()

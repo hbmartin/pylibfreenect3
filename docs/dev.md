@@ -24,8 +24,9 @@ Core tests cover runtime/API identity, canonical factories, environment aliases,
 dump selection, replay filename parsing, stream filtering, calibration, and
 repeatable lifecycle. Binding tests cover every enum and frame layout, typed
 values, missing keys, source-backed frames, deletion orders, pipeline
-consumption, registration validation, dump table copies, bundles, and loose
-replay.
+consumption, both registration models, runtime snapshots, dump table copies,
+canonical/legacy recording boundaries, attached profiles, salvage, timing, and
+loose replay.
 
 Release candidates additionally run ownership and replay under ASan/UBSan. On
 a real Kinect, every macOS wheel must capture at least 100 color/IR/depth frames
@@ -39,8 +40,8 @@ above 128 MiB. `PYLIBF3_HARDWARE_SOAK_FRAMES` and
 `PYLIBF3_HARDWARE_SOAK_MAX_RSS_MB` can raise those release-gate thresholds for
 longer local qualification runs.
 
-Stable publication requires this repository to be tagged `v1.0.0` while the
-core remains coordinated at `v0.3.0`. Each repaired wheel is installed in a
+Stable publication requires this repository to be tagged `v2.0.0` while the
+core remains coordinated at `v0.4.0`. Each repaired wheel is installed in a
 clean environment and inspected with `otool`/delocate or `ldd`/auditwheel. Only
 bundled project dependencies and platform-provided libraries may remain.
 Releases use `uv build`, provenance attestation through `actions/attest`, and

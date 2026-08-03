@@ -22,8 +22,9 @@ the native capture. Releasing a frame set is idempotent and rejects new frame
 lookups.
 
 Use `Camera.frames()` for synchronous iteration and `Camera.open_recording`
-for schema-v1 bundles. Async capture and decoder-thread Python callbacks are
-not part of pylibfreenect3 1.0.
+for canonical core recordings. Version 1.x Python-specific bundles remain
+available through `pylibfreenect3.legacy.RecordingBundle`. Async capture and
+decoder-thread Python callbacks are not part of pylibfreenect3 2.0.
 
 Timestamp alignment is opt-in. Omitting `alignment` preserves the legacy
 arrival-based pairing behavior and makes `FrameSet.alignment_delta_ticks` and
@@ -32,6 +33,17 @@ threshold and bounded queues of eight frames per stream. An aligned listener
 expects a single consuming thread; with concurrent waiters the reported
 per-set delta and statistics reflect the most recent delivery, which may
 belong to another thread's frame set.
+
+Runtime health counters are immutable snapshots and remain readable after a
+device is stopped:
+
+```python
+snapshot = camera.runtime_stats
+print(snapshot.color.decoded_frames, snapshot.depth.sequence_gaps)
+```
+
+Closing the underlying device ends access to future snapshots. Previously
+returned dataclasses remain ordinary readable Python values.
 
 ## Processes and threads
 

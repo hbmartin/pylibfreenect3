@@ -8,7 +8,7 @@
 Modern, typed, ownership-safe Python bindings for Microsoft Kinect v2 through
 [`libfreenect2-metal`](https://github.com/hbmartin/libfreenect2-metal).
 
-`pylibfreenect3` 1.0 provides:
+`pylibfreenect3` 2.0 provides:
 
 - a small high-level `Camera` API for synchronized color, infrared, and depth
   capture;
@@ -16,7 +16,7 @@ Modern, typed, ownership-safe Python bindings for Microsoft Kinect v2 through
 - CPU and Apple Metal packet-processing backends in prebuilt wheels;
 - camera registration, configuration, exposure, and LED controls;
 - opt-in timestamp alignment and reusable OpenCV/MediaPipe vision primitives;
-- checksummed recording bundles and deterministic replay; and
+- canonical, durable native recording and deterministic replay; and
 - a typed low-level API for applications that need direct device control.
 
 This release targets GIL-enabled CPython 3.12–3.14. Python 3.15 prereleases are
@@ -32,7 +32,7 @@ and does **not** provide the old `pylibfreenect2` import name.
 
 The wheels also bundle the compatible core library, libusb, and TurboJPEG.
 Windows, Intel macOS, Linux ARM64, free-threaded CPython, and GPU-enabled Linux
-wheels are not part of the 1.0 release. Other platforms may work from source if
+wheels are not part of the 2.0 release. Other platforms may work from source if
 the core library and a supported packet pipeline can be built there.
 
 Live capture requires a Kinect v2, its power/USB adapter, and a USB 3 connection.
@@ -158,6 +158,15 @@ usually the cheapest option when only one stream needs to outlive the capture.
 
 ## Registration
 
+There are two deliberately separate registration models:
+
+- `Registration` is the Kinect factory polynomial mapping and remains the
+  right choice for factory calibration and color-to-depth correspondence.
+- `ProjectiveRegistration` uses a conventional camera profile, rigid
+  depth-to-color transform, and explicit rasterization options.
+
+### Factory registration
+
 `Registration` uses the active device's calibration to align color with depth.
 Use a workspace in a live vision loop to keep output buffer identities stable:
 
@@ -204,6 +213,39 @@ Pillow are not package dependencies.
 The [cookbook](docs/cookbook.md) documents the output layouts and shows how
 to register saved color and filtered-depth arrays safely.
 
+### Projective registration
+
+Profiles are parsed, validated, and persisted by the native core. They are
+read-only snapshots in Python:
+
+```python
+from pylibfreenect3 import (
+    CalibrationProfile,
+    ProjectiveRegistration,
+    ProjectiveRegistrationOptions,
+    RegistrationRasterization,
+)
+
+profile = CalibrationProfile.load("profile.json")
+registration = ProjectiveRegistration(
+    profile,
+    options=ProjectiveRegistrationOptions(
+        rasterization=RegistrationRasterization.FOUR_NEIGHBOR_SPLAT,
+        apply_depth_correction=False,
+    ),
+)
+registered_depth = registration.apply(frames.depth)
+```
+
+The target defaults to `profile.color_camera`. Depth correction and custom
+depth limits are opt-in. `apply(..., out=frame)` reuses a caller-owned float
+frame; concurrent calls are supported when their output storage is distinct.
+
+`camera.runtime_stats` returns an immutable native counter snapshot. A
+manifest-v2 replay carrying `calibration/profile.json` also exposes a copied
+`camera.calibration_profile`; live devices and recordings without an attachment
+return `None`.
+
 ## Pipelines
 
 Pass `pipeline="auto"` to let the core choose the best usable backend, or name
@@ -246,37 +288,34 @@ with context.open_device(pipeline=pipeline) as device:
 
 ## Recording and replay
 
-Recording bundles are directories containing an atomic `manifest.json`,
-camera calibration sidecars, and raw JPEG/depth packets. File sizes and SHA-256
-checksums are validated when a bundle is opened.
+Canonical recordings are durable libfreenect2 directories containing a
+versioned `manifest.json`, an append-only `frames.ndjson` journal, factory
+calibration, raw JPEG/depth packets, and a completion marker. Version 2 may also
+carry a conventional calibration profile.
 
 Recording requires the dump pipeline, and the destination must not already
 exist:
 
 ```python
-from pylibfreenect3 import Camera, RecordingWriter
+from pylibfreenect3 import RecordingWriter
 
-with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
-    with RecordingWriter("capture.f3", camera) as recording:
-        recording.capture(100, timeout=2.0)
+with RecordingWriter("capture.f3", streams=("color", "depth")) as recording:
+    recording.capture(depth_frames=100, timeout=10.0)
 ```
 
-Recording is synchronous by default. For sustained capture, a bounded worker
-queue can move checksumming and filesystem writes off the capture loop:
+`RecordingWriter` owns the live dump-pipeline device for the duration of the
+context. Its bounded native queue copies frame callbacks without blocking the
+USB pipeline and reports frame-oriented statistics:
 
 ```python
-with Camera.open(pipeline="dump", streams=("color", "depth")) as camera:
-    with RecordingWriter(
-        "capture.f3", camera, queue_size=8, overflow="drop"
-    ) as recording:
-        recording.capture(1_000, timeout=2.0)
-        print(recording.flush())
+with RecordingWriter("capture.f3", queue_capacity=32) as recording:
+    recording.capture(duration=30.0)
+    print(recording.stats)
 ```
 
-`overflow="block"` applies backpressure when the queue is full;
-`overflow="drop"` keeps capture moving and records dropped frame-set counts in
-`RecordingWriter.stats` and the final manifest. Recording bundles contain raw
-JPEG/depth packets, not an encoded video container.
+Pass `calibration_profile=CalibrationProfile.load("profile.json")` to attach a
+validated canonical profile. Serial mismatches are rejected unless
+`allow_serial_mismatch=True` is supplied explicitly.
 
 Replay the bundle through any decoded pipeline available on the machine:
 
@@ -287,10 +326,14 @@ with Camera.open_recording("capture.f3", pipeline="auto") as replay:
         print(frames.depth.to_numpy().shape)
 ```
 
-`Camera.open_recording(..., streams=(...))` can replay a subset of the streams
-stored in a bundle. Loose `.jpg`/`.jpeg` and `.depth` packets can be opened with
-`lowlevel.ReplayContext`; raw depth packets require an explicit, validated
-`ReplayCalibration`.
+`Camera.open_recording(..., streams=(...))` can request a subset of the streams.
+Use `ReplayOptions(reproduce_timing=True)` to reproduce recorded arrival
+offsets, or explicitly enable `salvage_incomplete` when inspecting an
+interrupted recording. Loose `.jpg`/`.jpeg` and `.depth` packets can still be
+opened with `lowlevel.ReplayContext`; raw depth packets require an explicit,
+validated `ReplayCalibration`. The reader for pylibfreenect3 1.x's former
+Python-specific bundle format remains available as
+`pylibfreenect3.legacy.RecordingBundle`.
 
 ## Device configuration and logging
 
@@ -343,7 +386,21 @@ finally:
 `Frame`, `FrameSet`, and the parameter dataclasses can also be used without a
 physical device, which is useful for tests and replay tooling.
 
-## Migrating from 0.3
+## Migrating to 2.0
+
+Version 2.0 requires libfreenect2-metal 0.4/API 4. It replaces the former
+Python-specific recording writer with the core's canonical v2 recording and
+replay APIs, makes `Frame.allocate(..., frame_format=...)` explicit, and adds
+runtime statistics, calibration profiles, and projective registration.
+
+Version 1.x recording bundles remain readable through
+`pylibfreenect3.legacy.RecordingBundle`, but new recordings are always written
+in the canonical core format.
+
+See the [1.x to 2.0 migration guide](docs/migration-2.md) for recording and
+registration replacements.
+
+### Migrating from the pre-1.0 API
 
 Version 1.0 removes the old top-level aliases. Accessing one raises an
 `AttributeError` that names its replacement.
@@ -364,8 +421,6 @@ Version 1.0 removes the old top-level aliases. Accessing one raises an
 | `core_revision()` | `core_build_revision()` |
 | `LIBFREENECT2_INSTALL_PREFIX` | `Freenect2_ROOT` |
 
-Schema-v1 recording bundles remain readable and writable without conversion.
-
 ## Exceptions
 
 All library-specific exceptions inherit from `FreenectError`:
@@ -378,9 +433,11 @@ All library-specific exceptions inherit from `FreenectError`:
 | `WorkspaceStateError` | A registration workspace lacks applied data or a required map |
 | `FrameTimeoutError` | No synchronized frame set arrives before the timeout |
 | `ReplayError` | Raw packet replay fails |
+| `RecordingError` | A native recording writer cannot start, capture, or finalize |
 | `RecordingFormatError` | A bundle is invalid, incomplete, unsafe, or incompatible |
+| `CalibrationError` | A calibration profile is invalid or incompatible with a device |
 
-Capture is intentionally synchronous in 1.0. Packet-parser hooks,
+Capture is intentionally synchronous in 2.0. Packet-parser hooks,
 decoder-thread Python callbacks, a Python logging callback, and an asyncio
 adapter are not exposed because their thread-safety and lifetime semantics
 would be misleading.
@@ -412,14 +469,14 @@ timeout, and test a smaller stream set such as `streams=("depth",)`.
 ### A source build finds the wrong core
 
 Set `Freenect2_ROOT` to the exact installation prefix of
-`libfreenect2-metal` 0.3.x. The build probe prints the architecture, discovery
+`libfreenect2-metal` 0.4.x. The build probe prints the architecture, discovery
 source, headers, libraries, runtime/API version, compiled pipelines, and linked
 libraries to make mismatches visible.
 
 ## Building from source
 
 Source installations link against an already-installed
-[`libfreenect2-metal`](https://github.com/hbmartin/libfreenect2-metal) 0.3.x.
+[`libfreenect2-metal`](https://github.com/hbmartin/libfreenect2-metal) 0.4.x.
 The build looks for it in this order:
 
 1. `Freenect2_ROOT`
@@ -434,8 +491,22 @@ export Freenect2_ROOT=/opt/libfreenect2-metal
 uv build --wheel
 ```
 
+On macOS, install the native core from the
+[`hbmartin/tap`](https://github.com/hbmartin/homebrew-tap) Homebrew tap and let
+Homebrew provide the architecture-specific prefix:
+
+```console
+brew install hbmartin/tap/libfreenect2-metal
+export Freenect2_ROOT="$(brew --prefix libfreenect2-metal)"
+uv build --wheel
+```
+
+Use `brew install --HEAD hbmartin/tap/libfreenect2-metal` when building the
+bindings against the core's current development branch instead of the latest
+tagged formula release.
+
 The extension uses C++17 and requires Cython 3.2.8 or newer and NumPy 2.2 or
-newer. The core headers and runtime must both be version 0.3.x with API 3.
+newer. The core headers and runtime must both be version 0.4.x with API 4.
 
 ## Development
 

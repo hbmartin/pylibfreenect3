@@ -18,6 +18,10 @@ class WorkspaceStateError(DeviceStateError):
     """A registration workspace lacks applied data or a required map."""
 
 
+class CalibrationError(FreenectError, ValueError):
+    """A native calibration profile is invalid or incompatible with a device."""
+
+
 class FrameTimeoutError(FreenectError, TimeoutError):
     """No synchronized frame set arrived before the timeout."""
 
@@ -28,3 +32,7 @@ class ReplayError(FreenectError):
 
 class RecordingFormatError(ReplayError, ValueError):
     """A recording bundle is incomplete, unsafe, or incompatible."""
+
+
+class RecordingError(FreenectError):
+    """A canonical recording session could not start or finalize cleanly."""

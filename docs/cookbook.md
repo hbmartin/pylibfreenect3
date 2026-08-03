@@ -45,8 +45,8 @@ cv2.imshow("depth", display)
 ```
 
 An 8-bit video cannot recover the original millimetre values. Use `np.save`
-for processed depth arrays, or a `RecordingWriter` bundle for checksummed raw
-packets and calibration. Convert to metres with
+for processed depth arrays, or a canonical `RecordingWriter` directory for
+durable raw packets and calibration. Convert to metres with
 `depth_m = depth_mm / 1000.0`.
 
 The optional registration `big_depth` output is also `float32` depth in
@@ -104,6 +104,40 @@ continues to allocate independently owned outputs. The old
 OpenCV-compatible `float64` arrays. Kinect color calibration uses a nonstandard
 reverse-engineered polynomial and cannot be represented as an ordinary OpenCV
 camera matrix plus distortion vector.
+
+## Conventional projective registration
+
+`ProjectiveRegistration` is separate from the factory-polynomial
+`Registration` API. It consumes a canonical `CalibrationProfile`, projects
+decoded float depth through a rigid transform, and produces float depth in a
+selected target camera:
+
+```python
+from pylibfreenect3 import (
+    CalibrationProfile,
+    ProjectiveRegistration,
+    ProjectiveRegistrationOptions,
+    RegistrationRasterization,
+)
+
+profile = CalibrationProfile.load("profile.json")
+projective = ProjectiveRegistration(
+    profile,
+    target=profile.color_camera.rectified(),
+    options=ProjectiveRegistrationOptions(
+        rasterization=RegistrationRasterization.NEAREST,
+        min_depth_mm=500.0,
+        max_depth_mm=4500.0,
+        apply_depth_correction=False,
+    ),
+)
+target_depth = projective.apply(frames.depth)
+```
+
+Nearest rasterization writes one target pixel per projected source sample.
+Four-neighbor splatting fills the surrounding target pixels; both resolve
+collisions by nearest Z. Missing or out-of-range pixels are zero. Correction
+is never enabled from the profile implicitly.
 
 ## Complete examples
 
@@ -164,8 +198,9 @@ requested value depends on the device firmware.
 
 If a consumer needs a lower sampling rate, receive and promptly release every
 frame set while processing selected sequences. Video encoding and multi-camera
-disk writes should not run serially in the capture loop. `RecordingWriter` can
-use a bounded background queue and reports whether frame sets were dropped.
+disk writes should not run serially in the capture loop. `RecordingWriter`
+owns a bounded native queue and reports dropped raw frames in its frame-oriented
+`RecordingStats` snapshot.
 
 ## Backend failures
 

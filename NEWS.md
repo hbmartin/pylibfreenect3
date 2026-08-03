@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.0
+
+- Requires libfreenect2-metal 0.4/API 4 and rebuilds the native extension for
+  the new shared-library ABI.
+- Adds immutable runtime-health snapshots for devices and cameras.
+- Adds canonical calibration-profile loading, inspection, device binding, and
+  conventional CPU projective registration with explicit rasterization and
+  depth-correction controls.
+- Replaces the Python-specific recording writer with the native durable
+  manifest-v2 writer and adds native directory replay, timing reproduction,
+  incomplete-recording salvage, and attached-profile access.
+- Keeps the version-1 Python recording reader under `pylibfreenect3.legacy` so
+  existing bundles remain replayable through the loose-file API.
+- Requires a concrete pixel format when allocating caller-owned frames and
+  uses the core's format-aware constructor throughout the native boundary.
+
 ## 1.0.0
 
 - Requires Python 3.12+ and adopts a curated high-level API with native
