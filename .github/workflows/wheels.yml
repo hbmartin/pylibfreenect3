@@ -7,7 +7,7 @@ on:
       core_ref:
         description: libfreenect2-metal ref (release builds require v0.4.0)
         required: false
-        default: 6862898314f4ec7bad468653d8fa07b10c8c53ec
+        default: f063ecc8698bd51d33a502894c87d4789da9faa3
   push:
     tags:
       - "v*"
@@ -21,7 +21,7 @@ concurrency:
 
 env:
   UV_VERSION: 0.12.0
-  CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.4.0' || '6862898314f4ec7bad468653d8fa07b10c8c53ec') }}
+  CORE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.core_ref || (startsWith(github.ref, 'refs/tags/') && 'v0.4.0' || 'f063ecc8698bd51d33a502894c87d4789da9faa3') }}
 
 jobs:
   quality:
