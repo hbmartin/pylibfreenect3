@@ -11,6 +11,8 @@ import pytest
 import pylibfreenect3.recording as recording_module
 from pylibfreenect3 import (
     ColorCameraParams,
+    DeviceOpenError,
+    DeviceStateError,
     IrCameraParams,
     RecordingError,
     RecordingStats,
@@ -458,6 +460,114 @@ def test_normal_finalization_failure_preserves_incomplete_directory(
     with pytest.raises(RecordingError, match="disk full"), RecordingWriter(path):
         pass
     assert path.is_dir()
+
+
+def test_entry_failure_removes_partial_directory_and_invalidates_stats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "capture"
+
+    class FakeNativeWriter:
+        is_open = True
+        last_error = ""
+
+        def __init__(self, target: str, queue_capacity: int) -> None:
+            Path(target).mkdir()
+
+        def close(self) -> None:
+            pass
+
+    class FakeContext:
+        def open_device(self, device: object, *, pipeline: object) -> object:
+            raise DeviceOpenError("no device attached")
+
+    monkeypatch.setattr(
+        recording_module._native, "NativeRecordingWriterHandle", FakeNativeWriter
+    )
+    monkeypatch.setattr(recording_module, "Context", FakeContext)
+
+    writer = RecordingWriter(path)
+    with pytest.raises(DeviceOpenError, match="no device"):
+        writer.__enter__()
+    assert not path.exists()
+    with pytest.raises(DeviceStateError, match="not open"):
+        _ = writer.stats
+
+
+def test_entry_failure_inside_native_writer_never_deletes_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "capture"
+
+    class ClaimedPathNativeWriter:
+        def __init__(self, target: str, queue_capacity: int) -> None:
+            # Simulate the target appearing (for example, another process
+            # winning a creation race) so the native open fails: the wrapper
+            # cannot prove ownership and must not delete it.
+            Path(target).mkdir()
+            raise RecordingError("recording target already exists")
+
+    monkeypatch.setattr(
+        recording_module._native,
+        "NativeRecordingWriterHandle",
+        ClaimedPathNativeWriter,
+    )
+
+    with pytest.raises(RecordingError, match="already exists"), RecordingWriter(path):
+        pass
+    assert path.is_dir()
+
+
+def test_close_notes_device_error_when_native_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "capture"
+
+    class FailingNativeWriter:
+        is_open = True
+        last_error = ""
+
+        def __init__(self, target: str, queue_capacity: int) -> None:
+            Path(target).mkdir()
+
+        def publish_calibration(self, device: object) -> None:
+            pass
+
+        def close(self) -> None:
+            raise RecordingError("disk full")
+
+    class FakeNativeDevice:
+        def set_color_listener(self, listener: object) -> None:
+            pass
+
+        def set_depth_listener(self, listener: object) -> None:
+            pass
+
+    class FakeDevice:
+        _native = FakeNativeDevice()
+
+        def start(self, *, rgb: bool, depth: bool) -> None:
+            pass
+
+        def close(self) -> None:
+            raise RuntimeError("usb teardown failed")
+
+    class FakeContext:
+        def open_device(self, device: object, *, pipeline: object) -> FakeDevice:
+            return FakeDevice()
+
+    monkeypatch.setattr(
+        recording_module._native,
+        "NativeRecordingWriterHandle",
+        FailingNativeWriter,
+    )
+    monkeypatch.setattr(recording_module, "Context", FakeContext)
+
+    writer = RecordingWriter(path)
+    writer.__enter__()
+    with pytest.raises(RecordingError, match="disk full") as caught:
+        writer.close()
+    assert any("usb teardown failed" in note for note in caught.value.__notes__)
 
 
 def test_replay_calibration_rejects_wrong_shapes_and_dtypes() -> None:

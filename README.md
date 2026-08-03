@@ -317,6 +317,10 @@ Pass `calibration_profile=CalibrationProfile.load("profile.json")` to attach a
 validated canonical profile. Serial mismatches are rejected unless
 `allow_serial_mismatch=True` is supplied explicitly.
 
+A frame-count `capture()` waits indefinitely unless `timeout=` is given. If
+the `with` block raises, the recording is still finalized and kept, so the
+frames captured before the failure remain replayable.
+
 Replay the bundle through any decoded pipeline available on the machine:
 
 ```python

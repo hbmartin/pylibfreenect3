@@ -11,6 +11,9 @@
 - Replaces the Python-specific recording writer with the native durable
   manifest-v2 writer and adds native directory replay, timing reproduction,
   incomplete-recording salvage, and attached-profile access.
+- Finalizes and keeps a recording when its `with` block exits with an
+  exception; only a failure while entering the context removes the partial
+  directory.
 - Keeps the version-1 Python recording reader under `pylibfreenect3.legacy` so
   existing bundles remain replayable through the loose-file API.
 - Requires a concrete pixel format when allocating caller-owned frames and
