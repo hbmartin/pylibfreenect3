@@ -80,7 +80,6 @@ class RecordingWriter:
         self._native: _native.NativeRecordingWriterHandle | None = None
         self._closed = False
         self._entered = False
-        self._final_stats = RecordingStats(0, 0, 0, 0, 0)
 
     def __enter__(self) -> RecordingWriter:
         if self._entered:
@@ -140,6 +139,10 @@ class RecordingWriter:
             raise
 
     def _cleanup_failed_entry(self) -> None:
+        # Only a successfully constructed native writer proves this writer
+        # created self.path; anything else appearing there is not ours to
+        # delete.
+        owns_path = self._native is not None
         if self._device is not None:
             with suppress(BaseException):
                 self._device.close()
@@ -150,7 +153,7 @@ class RecordingWriter:
         self._context = None
         self._native = None
         self._closed = True
-        if self.path.exists():
+        if owns_path and self.path.exists():
             shutil.rmtree(self.path, ignore_errors=True)
 
     def _require_open(self) -> _native.NativeRecordingWriterHandle:
@@ -160,8 +163,9 @@ class RecordingWriter:
 
     @property
     def stats(self) -> RecordingStats:
+        """Live native frame counters; also readable after a finalized close."""
         if self._native is None:
-            return self._final_stats
+            raise DeviceStateError("recording writer is not open")
         return _dataclass_from_mapping(RecordingStats, self._native.statistics())
 
     def capture(
@@ -172,6 +176,15 @@ class RecordingWriter:
         duration: float | None = None,
         timeout: float | None = None,
     ) -> RecordingStats:
+        """Block until one incremental bound is reached, then return stats.
+
+        Exactly one of ``depth_frames``, ``color_frames``, or ``duration``
+        must be given. ``timeout`` applies only to frame-count bounds and
+        defaults to ``None``, which waits indefinitely while the writer stays
+        healthy. The returned snapshot is live: frames still queued in the
+        native writer are counted once persisted, so totals are final only
+        after ``close()``.
+        """
         native = self._require_open()
         bounds = (depth_frames, color_frames, duration)
         if sum(value is not None for value in bounds) != 1:
@@ -241,9 +254,10 @@ class RecordingWriter:
                 device_error = error
         try:
             self._native.close()
-            self._final_stats = _dataclass_from_mapping(
-                RecordingStats, self._native.statistics()
-            )
+        except BaseException as error:
+            if device_error is not None:
+                error.add_note(f"device shutdown also failed: {device_error}")
+            raise
         finally:
             self._device = None
             self._context = None

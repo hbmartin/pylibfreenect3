@@ -24,7 +24,15 @@ with RecordingWriter("capture", queue_capacity=32) as writer:
 The new writer accepts one incremental bound per `capture()` call:
 `depth_frames=`, `color_frames=`, or `duration=`. Its statistics count native
 frames and bytes; the old submitted/pending/failed frame-set counters and
-block/drop modes no longer exist.
+block/drop modes no longer exist. A frame-count `capture()` without an
+explicit `timeout=` waits indefinitely while the writer stays healthy.
+
+Exceptional exits keep the recording. In 1.x, an exception inside the
+`with` block aborted and deleted the partial bundle. The 2.0 writer always
+finalizes on exit, so the frames captured before the exception remain
+replayable. Delete the directory yourself if a failed run should leave
+nothing behind. Only a failure while *entering* the context — before any
+frame can be captured — removes the partial directory.
 
 `Camera.open_recording()` now accepts only canonical native directories. It
 does not inspect or reinterpret the old Python bundle:

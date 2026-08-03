@@ -1114,7 +1114,7 @@ cdef class NativeProjectiveRegistrationHandle:
     cdef void _check(self) except *:
         _require_process(self.owner_pid)
         if self.ptr == NULL:
-            raise DeviceStateError("projective registration is no longer valid")
+            raise CalibrationError("projective registration is no longer valid")
 
     def target_camera(self):
         self._check()
@@ -1135,7 +1135,7 @@ cdef class NativeProjectiveRegistrationHandle:
         with nogil:
             ok = self.ptr.apply(deref(depth.ptr), deref(output.ptr), &error)
         if not ok:
-            raise ValueError(_text(error))
+            raise CalibrationError(_text(error))
 
 
 cdef class NativeDeviceHandle:
